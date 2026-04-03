@@ -66,41 +66,42 @@ Beast Vehicles Inventory System helps workshops and dealerships track:
 | Axios | 1.x | HTTP client |
 
 ## Project Structure
+
+```
 beast-vehicles-inventory/
 │
 ├── backend/
-│ ├── src/
-│ │ ├── config/
-│ │ │ └── supabase.ts
-│ │ ├── controllers/
-│ │ │ └── inventoryController.ts
-│ │ ├── routes/
-│ │ │ └── inventoryRoutes.ts
-│ │ ├── middleware/
-│ │ ├── services/
-│ │ ├── utils/
-│ │ └── server.ts
-│ ├── .env
-│ ├── package.json
-│ └── tsconfig.json
+│   ├── src/
+│   │   ├── config/
+│   │   │   └── supabase.ts
+│   │   ├── controllers/
+│   │   │   └── inventoryController.ts
+│   │   ├── routes/
+│   │   │   └── inventoryRoutes.ts
+│   │   ├── middleware/
+│   │   ├── services/
+│   │   ├── utils/
+│   │   └── server.ts
+│   ├── .env
+│   ├── package.json
+│   └── tsconfig.json
 │
 ├── frontend/
-│ ├── src/
-│ │ ├── screens/
-│ │ ├── components/
-│ │ ├── services/
-│ │ ├── contexts/
-│ │ └── App.tsx
-│ ├── package.json
-│ └── app.json
+│   ├── src/
+│   │   ├── screens/
+│   │   ├── components/
+│   │   ├── services/
+│   │   ├── contexts/
+│   │   └── App.tsx
+│   ├── package.json
+│   └── app.json
 │
 ├── database/
-│ ├── schema.sql
-│ └── seed.sql
+│   ├── schema.sql
+│   └── seed.sql
 │
 └── README.md
-
-text
+```
 
 ## Prerequisites
 
