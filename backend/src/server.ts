@@ -4,7 +4,10 @@ dotenv.config();
 import express from 'express';
 import cors from 'cors';
 import inventoryRoutes from './routes/inventoryRoutes';
-import partsRoutes from './routes/partsRoutes';  // NEW
+
+import customerRoutes from './routes/customerRoutes';
+import salesRoutes from './routes/salesRoutes';
+import paymentRoutes from './routes/paymentRoutes';  // NEW
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,7 +19,9 @@ app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use('/api/inventory', inventoryRoutes);
-app.use('/api/inventory/parts', partsRoutes);  // NEW
+app.use('/api/customers', customerRoutes);
+app.use('/api/sales', salesRoutes);
+app.use('/api/payments', paymentRoutes);  // NEW
 
 // Health check
 app.get('/health', (req, res) => {
@@ -41,6 +46,9 @@ app.all('*', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🔧 Inventory API: http://localhost:${PORT}/api/inventory/vehicles`);
-  console.log(`🔧 Parts API: http://localhost:${PORT}/api/inventory/parts`);  // NEW
+  console.log(`🔧 Vehicles API: http://localhost:${PORT}/api/inventory/vehicles`);
+  console.log(`🔧 Parts API: http://localhost:${PORT}/api/inventory/parts`);
+  console.log(`👥 Customers API: http://localhost:${PORT}/api/customers`);
+  console.log(`📦 Sales Orders API: http://localhost:${PORT}/api/sales`);
+  console.log(`💰 Payments API: http://localhost:${PORT}/api/payments`);  // NEW
 });
