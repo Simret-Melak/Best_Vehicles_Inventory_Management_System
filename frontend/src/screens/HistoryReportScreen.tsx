@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useCallback } from 'react';
 import {
   View,
@@ -14,7 +13,7 @@ import {
   Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { inventoryApi } from '../services/api';
+import { inventoryApi, salesApi, paymentApi } from '../services/api';
 import ItemHistoryModal from '../components/ItemHistoryModal';
 import HistoryFilterModal from '../components/HistoryFilterModal';
 
@@ -30,20 +29,95 @@ interface HistoryEntry {
   performed_by: string;
   notes: string;
   created_date: string;
+
+  sales_order_id?: string | null;
+  order_number?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  paid_amount?: number;
+  confirmed_amount?: number;
+  pending_amount?: number;
+  remaining_amount?: number;
+
+  // UI-calculated values
+  display_quantity_change?: number;
+  display_stock_after?: number | string;
 }
 
-const typeConfig: Record<string, { label: string; color: string; icon: string; bg: string }> = {
-  received: { label: 'Received', color: '#22c55e', icon: '➕', bg: 'rgba(34, 197, 94, 0.1)' },
-  stock_in: { label: 'Stock In', color: '#22c55e', icon: '➕', bg: 'rgba(34, 197, 94, 0.1)' },
-  sold: { label: 'Sold', color: '#ef4444', icon: '➖', bg: 'rgba(239, 68, 68, 0.1)' },
-  sale_confirmed: { label: 'Sale Confirmed', color: '#ef4444', icon: '➖', bg: 'rgba(239, 68, 68, 0.1)' },
-  reserved: { label: 'Reserved', color: '#f97316', icon: '🔒', bg: 'rgba(249, 115, 22, 0.1)' },
-  returned: { label: 'Returned', color: '#3b82f6', icon: '🔄', bg: 'rgba(59, 130, 246, 0.1)' },
+interface OrderContext {
+  orderId: string;
+  orderNumber: string;
+  customerName: string;
+  customerPhone?: string;
+  totalAmount: number;
+  submittedAmount: number;
+  confirmedAmount: number;
+  pendingAmount: number;
+  remainingAmount: number;
+}
+
+const typeConfig: Record<
+  string,
+  { label: string; color: string; icon: string; bg: string }
+> = {
+  received: {
+    label: 'Received',
+    color: '#22c55e',
+    icon: '➕',
+    bg: 'rgba(34, 197, 94, 0.1)',
+  },
+  stock_in: {
+    label: 'Stock In',
+    color: '#22c55e',
+    icon: '➕',
+    bg: 'rgba(34, 197, 94, 0.1)',
+  },
+  sold: {
+    label: 'Sold',
+    color: '#ef4444',
+    icon: '➖',
+    bg: 'rgba(239, 68, 68, 0.1)',
+  },
+  sale_confirmed: {
+    label: 'Sale Confirmed',
+    color: '#ef4444',
+    icon: '➖',
+    bg: 'rgba(239, 68, 68, 0.1)',
+  },
+  reserved: {
+    label: 'Reserved',
+    color: '#f97316',
+    icon: '🔒',
+    bg: 'rgba(249, 115, 22, 0.1)',
+  },
+  returned: {
+    label: 'Returned',
+    color: '#3b82f6',
+    icon: '🔄',
+    bg: 'rgba(59, 130, 246, 0.1)',
+  },
+  adjusted: {
+    label: 'Adjusted',
+    color: '#a855f7',
+    icon: '🛠️',
+    bg: 'rgba(168, 85, 247, 0.1)',
+  },
+};
+
+const toNumber = (value: any) => {
+  const numberValue = Number(value || 0);
+  return Number.isNaN(numberValue) ? 0 : numberValue;
+};
+
+const formatMoney = (value?: number) => {
+  return `Br ${toNumber(value).toLocaleString()}`;
 };
 
 const formatDate = (dateString: string) => {
   if (!dateString) return 'Unknown date';
+
   const date = new Date(dateString);
+
   return date.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
@@ -53,7 +127,177 @@ const formatDate = (dateString: string) => {
   });
 };
 
-const HistoryCard = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => void }) => {
+const normalizeType = (type: string) => {
+  return (type || '').toLowerCase();
+};
+
+const isCustomerRelatedTransaction = (type: string) => {
+  return ['reserved', 'sold', 'sale_confirmed', 'returned'].includes(
+    normalizeType(type)
+  );
+};
+
+const isSaleType = (type: string) => {
+  const normalized = normalizeType(type);
+  return normalized === 'sold' || normalized === 'sale_confirmed';
+};
+
+const isReservedType = (type: string) => {
+  return normalizeType(type) === 'reserved';
+};
+
+const isReturnedType = (type: string) => {
+  return normalizeType(type) === 'returned';
+};
+
+const isStockInType = (type: string) => {
+  const normalized = normalizeType(type);
+  return normalized === 'stock_in' || normalized === 'received';
+};
+
+const getDisplayQuantityChange = (transactionType: string, rawChange: any) => {
+  const normalized = normalizeType(transactionType);
+  const movedQty = Math.abs(toNumber(rawChange));
+
+  if (normalized === 'reserved') return -movedQty;
+  if (normalized === 'sold') return -movedQty;
+  if (normalized === 'sale_confirmed') return -movedQty;
+
+  if (normalized === 'returned') return movedQty;
+  if (normalized === 'received') return movedQty;
+  if (normalized === 'stock_in') return movedQty;
+
+  return toNumber(rawChange);
+};
+
+const getVehicleDisplayQuantityChange = (eventType: string) => {
+  const normalized = normalizeType(eventType);
+
+  if (normalized === 'received') return 1;
+  if (normalized === 'returned') return 1;
+  if (normalized === 'reserved') return -1;
+  if (normalized === 'sold' || normalized === 'sale_confirmed') return -1;
+
+  return 0;
+};
+
+const getVehicleStockAfter = (eventType: string) => {
+  const normalized = normalizeType(eventType);
+
+  if (normalized === 'received' || normalized === 'returned') return 'Available';
+  if (normalized === 'reserved') return 'Reserved';
+  if (normalized === 'sold' || normalized === 'sale_confirmed') return 'Sold';
+
+  return 'Updated';
+};
+
+const applyPartDisplayStockValues = (entries: HistoryEntry[], part: any) => {
+  const totalStock = toNumber(part?.quantity);
+  const reservedStock = toNumber(part?.reserved_quantity);
+  let runningAvailableStock = Math.max(0, totalStock - reservedStock);
+
+  const newestFirst = [...entries].sort((a, b) => {
+    const dateA = a.created_date ? new Date(a.created_date).getTime() : 0;
+    const dateB = b.created_date ? new Date(b.created_date).getTime() : 0;
+    return dateB - dateA;
+  });
+
+  const calculated = newestFirst.map((entry) => {
+    const transactionType = normalizeType(entry.transaction_type);
+    const movedQty = Math.abs(toNumber(entry.quantity_change));
+    const displayQuantityChange = getDisplayQuantityChange(
+      transactionType,
+      entry.quantity_change
+    );
+
+    const entryWithDisplayValues: HistoryEntry = {
+      ...entry,
+      display_quantity_change: displayQuantityChange,
+      display_stock_after: runningAvailableStock,
+    };
+
+    // Reverse the transaction so the next older row gets the available stock
+    // that existed immediately after that older transaction.
+    if (isStockInType(transactionType)) {
+      // Stock added increased available stock, so reverse by subtracting it.
+      runningAvailableStock = Math.max(0, runningAvailableStock - movedQty);
+    } else if (isReservedType(transactionType)) {
+      // Reservation decreased available stock, so reverse by adding it back.
+      runningAvailableStock += movedQty;
+    } else if (isSaleType(transactionType)) {
+      // In this workflow, sale confirmation usually sells already-reserved stock.
+      // Available stock stays the same during confirmation, so no reverse change.
+      runningAvailableStock = runningAvailableStock;
+    } else if (isReturnedType(transactionType)) {
+      // Returning/releasing reserved stock increased available stock,
+      // so reverse by subtracting that returned amount.
+      runningAvailableStock = Math.max(0, runningAvailableStock - movedQty);
+    } else {
+      // Generic fallback: after = before + display change,
+      // therefore before = after - display change.
+      runningAvailableStock = Math.max(
+        0,
+        runningAvailableStock - displayQuantityChange
+      );
+    }
+
+    return entryWithDisplayValues;
+  });
+
+  return calculated.sort((a, b) => {
+    const dateA = a.created_date ? new Date(a.created_date).getTime() : 0;
+    const dateB = b.created_date ? new Date(b.created_date).getTime() : 0;
+    return dateB - dateA;
+  });
+};
+
+const getCustomerContextLabel = (entry: HistoryEntry) => {
+  if (!entry.customer_name || !isCustomerRelatedTransaction(entry.transaction_type)) {
+    return null;
+  }
+
+  if (normalizeType(entry.transaction_type) === 'reserved') {
+    return `Reserved for ${entry.customer_name}`;
+  }
+
+  if (
+    normalizeType(entry.transaction_type) === 'sold' ||
+    normalizeType(entry.transaction_type) === 'sale_confirmed'
+  ) {
+    return `Bought by ${entry.customer_name}`;
+  }
+
+  if (normalizeType(entry.transaction_type) === 'returned') {
+    return `Returned from ${entry.customer_name}`;
+  }
+
+  return entry.customer_name;
+};
+
+const getNeedToPayText = (entry: HistoryEntry) => {
+  if (entry.remaining_amount === undefined) return '—';
+  return entry.remaining_amount > 0 ? formatMoney(entry.remaining_amount) : 'Fully paid';
+};
+
+const getDisplayChange = (entry: HistoryEntry) => {
+  return entry.display_quantity_change !== undefined
+    ? entry.display_quantity_change
+    : getDisplayQuantityChange(entry.transaction_type, entry.quantity_change);
+};
+
+const getDisplayStockAfter = (entry: HistoryEntry) => {
+  return entry.display_stock_after !== undefined
+    ? entry.display_stock_after
+    : entry.quantity_after;
+};
+
+const HistoryCard = ({
+  entry,
+  onPress,
+}: {
+  entry: HistoryEntry;
+  onPress: () => void;
+}) => {
   const cfg =
     typeConfig[entry.transaction_type] || {
       label: entry.transaction_type,
@@ -62,7 +306,10 @@ const HistoryCard = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => v
       bg: 'rgba(100, 116, 139, 0.1)',
     };
 
-  const isPositive = entry.quantity_change > 0;
+  const displayChange = getDisplayChange(entry);
+  const displayStockAfter = getDisplayStockAfter(entry);
+  const isPositive = displayChange > 0;
+  const customerContext = getCustomerContextLabel(entry);
 
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.7}>
@@ -74,8 +321,11 @@ const HistoryCard = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => v
 
           <View style={styles.cardHeaderContent}>
             <Text style={styles.itemName}>{entry.item_name || 'Unknown Item'}</Text>
+
             <View style={styles.typeBadge}>
-              <Text style={[styles.typeText, { color: cfg.color }]}>{cfg.label}</Text>
+              <Text style={[styles.typeText, { color: cfg.color }]}>
+                {cfg.label}
+              </Text>
             </View>
           </View>
 
@@ -86,9 +336,10 @@ const HistoryCard = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => v
                 isPositive ? styles.quantityPositive : styles.quantityNegative,
               ]}
             >
-              {isPositive ? `+${entry.quantity_change}` : entry.quantity_change}
+              {isPositive ? `+${displayChange}` : displayChange}
             </Text>
-            <Text style={styles.quantityAfter}>→ {entry.quantity_after}</Text>
+
+            <Text style={styles.quantityAfter}>→ {displayStockAfter}</Text>
           </View>
         </View>
 
@@ -98,13 +349,45 @@ const HistoryCard = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => v
           </Text>
         ) : null}
 
+        {customerContext ? (
+          <View style={styles.customerBox}>
+            <Text style={styles.customerText}>{customerContext}</Text>
+
+            {entry.customer_phone ? (
+              <Text style={styles.customerSubText}>📞 {entry.customer_phone}</Text>
+            ) : null}
+
+            {entry.order_number ? (
+              <Text style={styles.customerSubText}>Order: {entry.order_number}</Text>
+            ) : null}
+
+            <Text style={styles.customerPaidText}>
+              Paid / Submitted: {formatMoney(entry.paid_amount)}
+            </Text>
+
+            {entry.pending_amount !== undefined && entry.pending_amount > 0 ? (
+              <Text style={styles.customerPendingText}>
+                Waiting verification: {formatMoney(entry.pending_amount)}
+              </Text>
+            ) : null}
+
+            {entry.remaining_amount !== undefined && entry.remaining_amount > 0 ? (
+              <Text style={styles.customerRemainingText}>
+                Need to pay: {formatMoney(entry.remaining_amount)}
+              </Text>
+            ) : entry.remaining_amount !== undefined ? (
+              <Text style={styles.customerFullyPaidText}>Fully paid</Text>
+            ) : null}
+          </View>
+        ) : null}
+
         <View style={styles.cardFooter}>
           <Text style={styles.performedBy}>by {entry.performed_by || 'System'}</Text>
           <Text style={styles.date}>{formatDate(entry.created_date)}</Text>
         </View>
 
         {entry.notes ? (
-          <Text style={styles.notes} numberOfLines={1}>
+          <Text style={styles.notes} numberOfLines={2}>
             📝 {entry.notes}
           </Text>
         ) : null}
@@ -113,7 +396,13 @@ const HistoryCard = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => v
   );
 };
 
-const TableRow = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => void }) => {
+const TableRow = ({
+  entry,
+  onPress,
+}: {
+  entry: HistoryEntry;
+  onPress: () => void;
+}) => {
   const cfg =
     typeConfig[entry.transaction_type] || {
       label: entry.transaction_type,
@@ -122,7 +411,18 @@ const TableRow = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => void
       bg: 'rgba(100, 116, 139, 0.1)',
     };
 
-  const isPositive = entry.quantity_change > 0;
+  const displayChange = getDisplayChange(entry);
+  const displayStockAfter = getDisplayStockAfter(entry);
+  const isPositive = displayChange > 0;
+  const customerContext = getCustomerContextLabel(entry);
+  const needToPayText = getNeedToPayText(entry);
+
+  const needToPayStyle =
+    entry.remaining_amount === undefined
+      ? styles.neutralText
+      : entry.remaining_amount > 0
+        ? styles.remainingText
+        : styles.fullyPaidText;
 
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.7}>
@@ -133,6 +433,7 @@ const TableRow = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => void
 
         <View style={styles.itemCell}>
           <Text style={styles.itemNameText}>{entry.item_name || 'Unknown Item'}</Text>
+
           {entry.specifications ? (
             <Text style={styles.specsText} numberOfLines={1}>
               {entry.specifications}
@@ -142,8 +443,34 @@ const TableRow = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => void
 
         <View style={styles.typeCell}>
           <View style={[styles.tableTypeBadge, { backgroundColor: `${cfg.color}20` }]}>
-            <Text style={[styles.tableTypeText, { color: cfg.color }]}>{cfg.label}</Text>
+            <Text style={[styles.tableTypeText, { color: cfg.color }]}>
+              {cfg.label}
+            </Text>
           </View>
+        </View>
+
+        <View style={styles.customerCell}>
+          <Text style={styles.tableCellText} numberOfLines={1}>
+            {customerContext || '—'}
+          </Text>
+
+          {entry.order_number ? (
+            <Text style={styles.specsText} numberOfLines={1}>
+              {entry.order_number}
+            </Text>
+          ) : null}
+        </View>
+
+        <View style={styles.paidCell}>
+          <Text style={[styles.tableCellText, styles.paidText]}>
+            {entry.paid_amount !== undefined ? formatMoney(entry.paid_amount) : '—'}
+          </Text>
+        </View>
+
+        <View style={styles.remainingCell}>
+          <Text style={[styles.tableCellText, needToPayStyle]} numberOfLines={1}>
+            {needToPayText}
+          </Text>
         </View>
 
         <View style={styles.changeCell}>
@@ -154,12 +481,14 @@ const TableRow = ({ entry, onPress }: { entry: HistoryEntry; onPress: () => void
               isPositive ? styles.quantityPositive : styles.quantityNegative,
             ]}
           >
-            {isPositive ? `+${entry.quantity_change}` : entry.quantity_change}
+            {isPositive ? `+${displayChange}` : displayChange}
           </Text>
         </View>
 
         <View style={styles.afterCell}>
-          <Text style={[styles.tableCellText, styles.afterText]}>{entry.quantity_after}</Text>
+          <Text style={[styles.tableCellText, styles.afterText]}>
+            {displayStockAfter}
+          </Text>
         </View>
 
         <Text style={[styles.tableCellText, styles.byCell]}>
@@ -178,6 +507,7 @@ export default function HistoryReportScreen() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [userFilter, setUserFilter] = useState('all');
@@ -188,10 +518,114 @@ export default function HistoryReportScreen() {
   const [historyModalVisible, setHistoryModalVisible] = useState(false);
   const [selectedItem, setSelectedItem] = useState<any>(null);
 
+  const getOrderContext = async (
+    orderId: string | null | undefined,
+    cache: Map<string, OrderContext | null>
+  ): Promise<OrderContext | null> => {
+    if (!orderId) return null;
+
+    if (cache.has(orderId)) {
+      return cache.get(orderId) || null;
+    }
+
+    try {
+      const [orderDetailsResponse, paymentsResponse] = await Promise.all([
+        salesApi.getSalesOrderById(orderId),
+        paymentApi.getOrderPaymentHistory(orderId),
+      ]);
+
+      const orderDetails = orderDetailsResponse.data.data;
+      const paymentData = paymentsResponse.data.data;
+
+      const totalConfirmed = toNumber(paymentData?.summary?.total_confirmed);
+      const totalPending = toNumber(paymentData?.summary?.total_pending);
+      const totalSubmitted =
+        toNumber(paymentData?.summary?.total_submitted) ||
+        totalConfirmed + totalPending;
+
+      const totalAmount = toNumber(
+        paymentData?.order?.total_amount || orderDetails?.total_amount
+      );
+
+      const context: OrderContext = {
+        orderId,
+        orderNumber:
+          orderDetails?.order_number ||
+          paymentData?.order?.order_number ||
+          '',
+        customerName:
+          orderDetails?.customer?.full_name ||
+          paymentData?.order?.customer_name ||
+          '',
+        customerPhone:
+          orderDetails?.customer?.phone ||
+          '',
+        totalAmount,
+        submittedAmount: totalSubmitted,
+        confirmedAmount: totalConfirmed,
+        pendingAmount: totalPending,
+        remainingAmount: Math.max(0, totalAmount - totalSubmitted),
+      };
+
+      cache.set(orderId, context);
+      return context;
+    } catch (error) {
+      console.log('Failed to load sales order context for history:', {
+        orderId,
+        error,
+      });
+
+      cache.set(orderId, null);
+      return null;
+    }
+  };
+
+  const buildHistoryEntry = async ({
+    base,
+    salesOrderId,
+    orderCache,
+    fallbackCustomerName,
+    fallbackCustomerPhone,
+    fallbackOrderNumber,
+  }: {
+    base: Omit<
+      HistoryEntry,
+      | 'sales_order_id'
+      | 'order_number'
+      | 'customer_name'
+      | 'customer_phone'
+      | 'paid_amount'
+      | 'confirmed_amount'
+      | 'pending_amount'
+      | 'remaining_amount'
+    >;
+    salesOrderId?: string | null;
+    orderCache: Map<string, OrderContext | null>;
+    fallbackCustomerName?: string;
+    fallbackCustomerPhone?: string;
+    fallbackOrderNumber?: string;
+  }): Promise<HistoryEntry> => {
+    const context = await getOrderContext(salesOrderId, orderCache);
+
+    return {
+      ...base,
+      sales_order_id: salesOrderId || null,
+      order_number: context?.orderNumber || fallbackOrderNumber || '',
+      customer_name: context?.customerName || fallbackCustomerName || '',
+      customer_phone: context?.customerPhone || fallbackCustomerPhone || '',
+      paid_amount: context?.submittedAmount,
+      confirmed_amount: context?.confirmedAmount,
+      pending_amount: context?.pendingAmount,
+      remaining_amount: context?.remainingAmount,
+    };
+  };
+
   const loadHistory = async () => {
     try {
       setLoading(true);
+
       const allTransactions: HistoryEntry[] = [];
+      const orderCache = new Map<string, OrderContext | null>();
 
       const vehiclesRes = await inventoryApi.getVehicles();
       const vehicles = vehiclesRes.data.data || [];
@@ -201,21 +635,38 @@ export default function HistoryReportScreen() {
         const vehicleHistory = historyRes?.data?.data?.history || [];
 
         for (const trans of vehicleHistory) {
-          allTransactions.push({
-            id: trans.id,
-            item_id: vehicle.id,
-            item_name: vehicle.model,
-            item_type: 'vehicle',
-            specifications: vehicle.specifications || '',
-            transaction_type: trans.event_type,
-            quantity_change:
-              trans.event_type === 'received' ? 1 : trans.event_type === 'sold' ? -1 : 0,
-            quantity_after:
-              trans.event_type === 'received' ? 1 : trans.event_type === 'sold' ? 0 : 1,
-            performed_by: trans.performed_by || 'System',
-            notes: trans.notes || '',
-            created_date: trans.created_at,
+          const salesOrderId =
+            trans.sales_order_id ||
+            trans.sales_order?.id ||
+            null;
+
+          const eventType = trans.event_type || 'unknown';
+          const vehicleDisplayChange = getVehicleDisplayQuantityChange(eventType);
+
+          const entry = await buildHistoryEntry({
+            salesOrderId,
+            orderCache,
+            fallbackCustomerName: trans.customer?.full_name || '',
+            fallbackCustomerPhone: trans.customer?.phone || '',
+            fallbackOrderNumber: trans.sales_order?.order_number || '',
+            base: {
+              id: `vehicle-${trans.id}`,
+              item_id: vehicle.id,
+              item_name: vehicle.model,
+              item_type: 'vehicle',
+              specifications: vehicle.specifications || '',
+              transaction_type: eventType,
+              quantity_change: vehicleDisplayChange,
+              quantity_after: vehicleDisplayChange === -1 ? 0 : 1,
+              display_quantity_change: vehicleDisplayChange,
+              display_stock_after: getVehicleStockAfter(eventType),
+              performed_by: trans.performed_by || 'System',
+              notes: trans.notes || '',
+              created_date: trans.created_at,
+            },
           });
+
+          allTransactions.push(entry);
         }
       }
 
@@ -224,23 +675,48 @@ export default function HistoryReportScreen() {
 
       for (const part of parts) {
         const transactionsRes = await inventoryApi.getPartTransactions(part.id);
-        const partTransactions = transactionsRes?.data?.data?.transactions || [];
+
+        const partTransactions =
+          transactionsRes?.data?.data?.transactions ||
+          transactionsRes?.data?.data ||
+          [];
+
+        const partEntries: HistoryEntry[] = [];
 
         for (const trans of partTransactions) {
-          allTransactions.push({
-            id: trans.id,
-            item_id: part.id,
-            item_name: part.name,
-            item_type: 'part',
-            specifications: part.specifications || '',
-            transaction_type: trans.transaction_type,
-            quantity_change: trans.quantity_change,
-            quantity_after: trans.quantity_after,
-            performed_by: trans.performed_by || 'System',
-            notes: trans.notes || '',
-            created_date: trans.created_at,
+          const salesOrderId =
+            trans.sales_order_id ||
+            trans.sales_order?.id ||
+            null;
+
+          const transactionType = trans.transaction_type || 'unknown';
+
+          const entry = await buildHistoryEntry({
+            salesOrderId,
+            orderCache,
+            fallbackCustomerName: trans.customer?.full_name || '',
+            fallbackCustomerPhone: trans.customer?.phone || '',
+            fallbackOrderNumber: trans.sales_order?.order_number || '',
+            base: {
+              id: `part-${trans.id}`,
+              item_id: part.id,
+              item_name: part.name,
+              item_type: 'part',
+              specifications: part.specifications || '',
+              transaction_type: transactionType,
+              quantity_change: toNumber(trans.quantity_change),
+              quantity_after: toNumber(trans.quantity_after),
+              performed_by: trans.performed_by || 'System',
+              notes: trans.notes || '',
+              created_date: trans.created_at,
+            },
           });
+
+          partEntries.push(entry);
         }
+
+        const calculatedPartEntries = applyPartDisplayStockValues(partEntries, part);
+        allTransactions.push(...calculatedPartEntries);
       }
 
       allTransactions.sort((a, b) => {
@@ -278,23 +754,33 @@ export default function HistoryReportScreen() {
   const filteredHistory = useMemo(() => {
     return history.filter((entry) => {
       const query = search.toLowerCase();
+
       const itemName = (entry.item_name || '').toLowerCase();
       const specs = (entry.specifications || '').toLowerCase();
       const notes = (entry.notes || '').toLowerCase();
       const performedBy = (entry.performed_by || 'system').toLowerCase();
+      const customerName = (entry.customer_name || '').toLowerCase();
+      const orderNumber = (entry.order_number || '').toLowerCase();
 
       if (
         query &&
         !itemName.includes(query) &&
         !specs.includes(query) &&
         !notes.includes(query) &&
-        !performedBy.includes(query)
+        !performedBy.includes(query) &&
+        !customerName.includes(query) &&
+        !orderNumber.includes(query)
       ) {
         return false;
       }
 
-      if (typeFilter !== 'all' && entry.transaction_type !== typeFilter) return false;
-      if (userFilter !== 'all' && (entry.performed_by || 'System') !== userFilter) return false;
+      if (typeFilter !== 'all' && entry.transaction_type !== typeFilter) {
+        return false;
+      }
+
+      if (userFilter !== 'all' && (entry.performed_by || 'System') !== userFilter) {
+        return false;
+      }
 
       if (dateFilter !== 'all' && entry.created_date) {
         const entryDate = new Date(entry.created_date);
@@ -310,14 +796,18 @@ export default function HistoryReportScreen() {
   }, [history, search, typeFilter, userFilter, dateFilter]);
 
   const handleItemClick = (entry: HistoryEntry) => {
+    const stockAfter = getDisplayStockAfter(entry);
+
     setSelectedItem({
       id: entry.item_id,
       name: entry.item_name,
       type: entry.item_type,
       sku: entry.item_type === 'vehicle' ? entry.item_name : 'Part',
-      current_quantity: entry.quantity_after,
+      current_quantity:
+        typeof stockAfter === 'number' ? stockAfter : entry.quantity_after,
       unit_price: 0,
     });
+
     setHistoryModalVisible(true);
   };
 
@@ -352,8 +842,13 @@ export default function HistoryReportScreen() {
       'Item',
       'Specifications',
       'Type',
+      'Customer',
+      'Order Number',
+      'Paid/Submitted',
+      'Pending Verification',
+      'Need to Pay',
       'Quantity Change',
-      'Quantity After',
+      'Available Stock After',
       'Performed By',
       'Notes',
     ];
@@ -363,13 +858,19 @@ export default function HistoryReportScreen() {
       entry.item_name || '',
       entry.specifications || '',
       entry.transaction_type,
-      entry.quantity_change,
-      entry.quantity_after,
+      entry.customer_name || '',
+      entry.order_number || '',
+      entry.paid_amount ?? '',
+      entry.pending_amount ?? '',
+      entry.remaining_amount ?? '',
+      getDisplayChange(entry),
+      getDisplayStockAfter(entry),
       entry.performed_by || 'System',
       entry.notes || '',
     ]);
 
     let csvContent = headers.join(',') + '\n';
+
     rows.forEach((row) => {
       csvContent += row.map((cell) => `"${cell}"`).join(',') + '\n';
     });
@@ -379,7 +880,10 @@ export default function HistoryReportScreen() {
   };
 
   const hasActiveFilters =
-    search !== '' || typeFilter !== 'all' || userFilter !== 'all' || dateFilter !== 'all';
+    search !== '' ||
+    typeFilter !== 'all' ||
+    userFilter !== 'all' ||
+    dateFilter !== 'all';
 
   if (loading && history.length === 0) {
     return (
@@ -406,24 +910,29 @@ export default function HistoryReportScreen() {
           <Text style={styles.headerIcon}>📜</Text>
           <Text style={styles.headerTitle}>Transaction History</Text>
         </View>
-        <Text style={styles.headerSubtitle}>{filteredHistory.length} transactions</Text>
+
+        <Text style={styles.headerSubtitle}>
+          {filteredHistory.length} transactions
+        </Text>
       </View>
 
       <View style={styles.actionBar}>
         <View style={styles.searchContainer}>
           <Text style={styles.searchIcon}>🔍</Text>
+
           <TextInput
             style={styles.searchInput}
-            placeholder="Search items, users, notes..."
+            placeholder="Search items, customers, orders, users, notes..."
             placeholderTextColor="#64748b"
             value={search}
             onChangeText={setSearch}
           />
-          {search !== '' && (
+
+          {search !== '' ? (
             <TouchableOpacity onPress={() => setSearch('')}>
               <Text style={styles.clearIcon}>✕</Text>
             </TouchableOpacity>
-          )}
+          ) : null}
         </View>
 
         <TouchableOpacity
@@ -438,41 +947,43 @@ export default function HistoryReportScreen() {
         </TouchableOpacity>
       </View>
 
-      {hasActiveFilters && (
+      {hasActiveFilters ? (
         <View style={styles.activeFilters}>
           <Text style={styles.activeFiltersLabel}>Active filters:</Text>
 
-          {search !== '' && (
+          {search !== '' ? (
             <View style={styles.filterChip}>
               <Text style={styles.filterChipText}>Search: {search}</Text>
             </View>
-          )}
+          ) : null}
 
-          {typeFilter !== 'all' && (
+          {typeFilter !== 'all' ? (
             <View style={styles.filterChip}>
-              <Text style={styles.filterChipText}>Type: {typeFilter.replace('_', ' ')}</Text>
+              <Text style={styles.filterChipText}>
+                Type: {typeFilter.replace('_', ' ')}
+              </Text>
             </View>
-          )}
+          ) : null}
 
-          {userFilter !== 'all' && (
+          {userFilter !== 'all' ? (
             <View style={styles.filterChip}>
               <Text style={styles.filterChipText}>User: {userFilter}</Text>
             </View>
-          )}
+          ) : null}
 
-          {dateFilter !== 'all' && (
+          {dateFilter !== 'all' ? (
             <View style={styles.filterChip}>
               <Text style={styles.filterChipText}>
                 {dateFilter === '7days' ? 'Last 7 days' : 'Last 30 days'}
               </Text>
             </View>
-          )}
+          ) : null}
 
           <TouchableOpacity onPress={clearAllFilters}>
             <Text style={styles.clearFiltersText}>Clear all</Text>
           </TouchableOpacity>
         </View>
-      )}
+      ) : null}
 
       <View style={styles.viewToggle}>
         <TouchableOpacity
@@ -480,7 +991,10 @@ export default function HistoryReportScreen() {
           onPress={() => setViewMode('cards')}
         >
           <Text
-            style={[styles.viewButtonText, viewMode === 'cards' && styles.viewButtonTextActive]}
+            style={[
+              styles.viewButtonText,
+              viewMode === 'cards' && styles.viewButtonTextActive,
+            ]}
           >
             📱 Cards
           </Text>
@@ -491,7 +1005,10 @@ export default function HistoryReportScreen() {
           onPress={() => setViewMode('table')}
         >
           <Text
-            style={[styles.viewButtonText, viewMode === 'table' && styles.viewButtonTextActive]}
+            style={[
+              styles.viewButtonText,
+              viewMode === 'table' && styles.viewButtonTextActive,
+            ]}
           >
             📊 Table
           </Text>
@@ -507,26 +1024,39 @@ export default function HistoryReportScreen() {
           )}
           contentContainerStyle={styles.listContent}
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#ef4444" />
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor="#ef4444"
+            />
           }
           showsVerticalScrollIndicator={false}
           ListEmptyComponent={renderEmptyState}
         />
       ) : (
-        <ScrollView horizontal showsHorizontalScrollIndicator={true}>
-          <View style={{ minWidth: '100%' }}>
-            {/* Table Header */}
+        <ScrollView horizontal showsHorizontalScrollIndicator>
+          <View>
             <View style={styles.tableHeader}>
               <Text style={[styles.tableHeaderCell, styles.dateCell]}>Date</Text>
               <Text style={[styles.tableHeaderCell, styles.itemCell]}>Item</Text>
               <Text style={[styles.tableHeaderCell, styles.typeCell]}>Type</Text>
-              <Text style={[styles.tableHeaderCell, styles.changeCell]}>Change</Text>
-              <Text style={[styles.tableHeaderCell, styles.afterCell]}>After</Text>
+              <Text style={[styles.tableHeaderCell, styles.customerCell]}>
+                Customer / Order
+              </Text>
+              <Text style={[styles.tableHeaderCell, styles.paidCell]}>Paid</Text>
+              <Text style={[styles.tableHeaderCell, styles.remainingCell]}>
+                Need to Pay
+              </Text>
+              <Text style={[styles.tableHeaderCell, styles.changeCell]}>
+                Qty Change
+              </Text>
+              <Text style={[styles.tableHeaderCell, styles.afterCell]}>
+                Available After
+              </Text>
               <Text style={[styles.tableHeaderCell, styles.byCell]}>By</Text>
               <Text style={[styles.tableHeaderCell, styles.notesCell]}>Notes</Text>
             </View>
 
-            {/* Table Rows - FlatList handles vertical scroll */}
             <FlatList
               data={filteredHistory}
               keyExtractor={(item) => item.id}
@@ -534,9 +1064,13 @@ export default function HistoryReportScreen() {
                 <TableRow entry={item} onPress={() => handleItemClick(item)} />
               )}
               refreshControl={
-                <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#ef4444" />
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={onRefresh}
+                  tintColor="#ef4444"
+                />
               }
-              showsVerticalScrollIndicator={true}
+              showsVerticalScrollIndicator
               ListEmptyComponent={renderEmptyState}
             />
           </View>
@@ -773,6 +1307,48 @@ const styles = StyleSheet.create({
     color: '#64748b',
     marginBottom: 8,
   },
+  customerBox: {
+    backgroundColor: '#0f172a',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  customerText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 3,
+  },
+  customerSubText: {
+    color: '#94a3b8',
+    fontSize: 11,
+    marginBottom: 2,
+  },
+  customerPaidText: {
+    color: '#22c55e',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 3,
+  },
+  customerPendingText: {
+    color: '#60a5fa',
+    fontSize: 11,
+    marginTop: 2,
+  },
+  customerRemainingText: {
+    color: '#fbbf24',
+    fontSize: 11,
+    marginTop: 2,
+    fontWeight: '600',
+  },
+  customerFullyPaidText: {
+    color: '#22c55e',
+    fontSize: 11,
+    marginTop: 2,
+    fontWeight: '600',
+  },
   cardFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -823,16 +1399,28 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   typeCell: {
-    width: 100,
+    width: 105,
+    paddingHorizontal: 8,
+  },
+  customerCell: {
+    width: 190,
+    paddingHorizontal: 8,
+  },
+  paidCell: {
+    width: 140,
+    paddingHorizontal: 8,
+  },
+  remainingCell: {
+    width: 140,
     paddingHorizontal: 8,
   },
   changeCell: {
-    width: 70,
+    width: 85,
     paddingHorizontal: 8,
     alignItems: 'center',
   },
   afterCell: {
-    width: 60,
+    width: 110,
     paddingHorizontal: 8,
     alignItems: 'center',
   },
@@ -841,7 +1429,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   notesCell: {
-    width: 150,
+    width: 170,
     paddingHorizontal: 8,
   },
   itemNameText: {
@@ -853,6 +1441,21 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#64748b',
     marginTop: 2,
+  },
+  paidText: {
+    color: '#22c55e',
+    fontWeight: '600',
+  },
+  remainingText: {
+    color: '#fbbf24',
+    fontWeight: '600',
+  },
+  fullyPaidText: {
+    color: '#22c55e',
+    fontWeight: '600',
+  },
+  neutralText: {
+    color: '#64748b',
   },
   changeText: {
     fontSize: 13,
