@@ -1,29 +1,40 @@
 import { Router } from 'express';
-import { 
+import {
   getCustomers,
   getCustomerById,
   createCustomer,
   updateCustomer,
   deleteCustomer,
   searchCustomers,
-  getCustomerOrders
+  getCustomerOrders,
 } from '../controllers/customerController';
+
+import {
+  requireAuth,
+  requireAdminApprovalAccess,
+  requireSalesRequestAccess,
+} from '../middleware/authMiddleware';
 
 const router = Router();
 
+// Customer access rules:
+// - super_admin/admin: can view, edit, delete customers
+// - worker: can view/search/create customers for sale requests
+// - store_manager: no customer access
+
 // GET routes
-router.get('/', getCustomers);
-router.get('/search', searchCustomers);
-router.get('/:id', getCustomerById);
-router.get('/:id/orders', getCustomerOrders);
+router.get('/', requireAuth, requireSalesRequestAccess, getCustomers);
+router.get('/search', requireAuth, requireSalesRequestAccess, searchCustomers);
+router.get('/:id', requireAuth, requireSalesRequestAccess, getCustomerById);
+router.get('/:id/orders', requireAuth, requireSalesRequestAccess, getCustomerOrders);
 
 // POST routes
-router.post('/', createCustomer);
+router.post('/', requireAuth, requireSalesRequestAccess, createCustomer);
 
-// PUT routes
-router.put('/:id', updateCustomer);
+// PUT routes - admin/super_admin only
+router.put('/:id', requireAuth, requireAdminApprovalAccess, updateCustomer);
 
-// DELETE routes
-router.delete('/:id', deleteCustomer);
+// DELETE routes - admin/super_admin only
+router.delete('/:id', requireAuth, requireAdminApprovalAccess, deleteCustomer);
 
 export default router;

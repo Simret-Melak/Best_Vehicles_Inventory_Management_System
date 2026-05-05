@@ -1,16 +1,39 @@
 import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
 
-const supabaseUrl = process.env.SUPABASE_URL!;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY!;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+dotenv.config();
 
-// Regular client (uses RLS)
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Admin client (bypasses RLS - use carefully!)
-export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false,
-  },
-});
+if (!supabaseUrl) {
+  throw new Error('SUPABASE_URL is missing');
+}
+
+if (!supabaseAnonKey) {
+  throw new Error('SUPABASE_ANON_KEY is missing');
+}
+
+if (!supabaseServiceRoleKey) {
+  throw new Error('SUPABASE_SERVICE_ROLE_KEY is missing');
+}
+
+// Used for normal backend database operations.
+// This uses the service role key, so only use it on the backend.
+export const supabase = createClient(supabaseUrl, supabaseServiceRoleKey);
+
+// Used for login and validating user tokens.
+export const supabaseAuth = createClient(supabaseUrl, supabaseAnonKey);
+
+// Used for admin auth actions like creating users.
+export const supabaseAdmin = createClient(
+  supabaseUrl,
+  supabaseServiceRoleKey,
+  {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+  }
+);
