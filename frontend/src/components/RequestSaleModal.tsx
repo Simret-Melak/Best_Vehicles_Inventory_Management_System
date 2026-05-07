@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -15,151 +15,180 @@ import {
   Keyboard,
 } from 'react-native';
 import { salesApi, customerApi } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
-type Customer = {
+interface Customer {
   id: string;
   full_name: string;
-  phone?: string | null;
-  email?: string | null;
-};
+  phone?: string;
+  email?: string;
+  address?: string;
+}
 
-type SaleItem = {
+interface SaleItem {
   id: string;
-  part_id?: string;
   vehicle_id?: string;
+  part_id?: string;
   name: string;
-  specifications?: string | null;
+  specifications: string;
   quantity: number;
   unit_price: number;
   chassis_number?: string;
   part_number?: string;
-};
+}
 
 interface RequestSaleModalProps {
   visible: boolean;
   onClose: () => void;
   item: SaleItem | null;
   itemType?: 'vehicle' | 'part';
-  customers: Customer[];
+  customers?: Customer[];
   onSuccess: () => void;
 }
+
+type PaymentMethod = 'cash' | 'transfer' | 'check' | 'bank_deposit';
+
+const toNumber = (value: any) => {
+  const numeric = Number(value || 0);
+  return Number.isNaN(numeric) ? 0 : numeric;
+};
+
+const formatMoney = (value: number) => {
+  return `Br ${toNumber(value).toLocaleString()}`;
+};
+
+const getUserId = (user: any) => {
+  return user?.id || user?.user_id || user?.uuid || null;
+};
+
+const getUserDisplayName = (user: any) => {
+  return user?.full_name || user?.name || user?.email || 'Worker';
+};
 
 export default function RequestSaleModal({
   visible,
   onClose,
   item,
   itemType = 'part',
-  customers,
+  customers = [],
   onSuccess,
 }: RequestSaleModalProps) {
+  const { user } = useAuth();
+
   const [loading, setLoading] = useState(false);
-
-  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
-  const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
   const [creatingCustomer, setCreatingCustomer] = useState(false);
+  const [loadingCustomers, setLoadingCustomers] = useState(false);
 
+  const [allCustomers, setAllCustomers] = useState<Customer[]>([]);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [customerSearch, setCustomerSearch] = useState('');
-  const [modalCustomers, setModalCustomers] = useState<Customer[]>([]);
-  const [searchingCustomers, setSearchingCustomers] = useState(false);
+  const [showNewCustomerForm, setShowNewCustomerForm] = useState(false);
 
   const [newCustomerName, setNewCustomerName] = useState('');
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   const [newCustomerEmail, setNewCustomerEmail] = useState('');
+  const [newCustomerAddress, setNewCustomerAddress] = useState('');
 
   const [quantity, setQuantity] = useState('1');
   const [notes, setNotes] = useState('');
 
-  const [paymentMethod, setPaymentMethod] = useState<
-    'cash' | 'transfer' | 'check' | 'bank_deposit'
-  >('transfer');
-
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash');
   const [bankName, setBankName] = useState('');
   const [referenceNumber, setReferenceNumber] = useState('');
   const [depositAmount, setDepositAmount] = useState('');
   const [fullPayment, setFullPayment] = useState(true);
 
-  const parsedQuantity = Number.parseInt(quantity || '0', 10);
-  const safeQuantity = Number.isNaN(parsedQuantity) ? 0 : parsedQuantity;
-  const totalAmount = item ? Number(item.unit_price || 0) * safeQuantity : 0;
+  const maxQuantity =
+    itemType === 'vehicle' ? 1 : Math.max(1, toNumber(item?.quantity));
+
+  const selectedQuantity =
+    itemType === 'vehicle'
+      ? 1
+      : Math.max(1, Math.min(toNumber(quantity), maxQuantity));
+
+  const totalAmount = item ? toNumber(item.unit_price) * selectedQuantity : 0;
+  const paidAmount = toNumber(depositAmount);
+  const remainingAmount = Math.max(0, totalAmount - paidAmount);
+  const isFullyPaid = totalAmount > 0 && paidAmount >= totalAmount;
+
+  const customersForDisplay = allCustomers.length > 0 ? allCustomers : customers;
+
+  const filteredCustomers = useMemo(() => {
+    const query = customerSearch.trim().toLowerCase();
+
+    if (!query) return customersForDisplay;
+
+    return customersForDisplay.filter((customer) => {
+      return (
+        customer.full_name?.toLowerCase().includes(query) ||
+        customer.phone?.toLowerCase().includes(query) ||
+        customer.email?.toLowerCase().includes(query)
+      );
+    });
+  }, [customersForDisplay, customerSearch]);
+
+  const resetForm = () => {
+    setSelectedCustomer(null);
+    setCustomerSearch('');
+    setShowNewCustomerForm(false);
+
+    setNewCustomerName('');
+    setNewCustomerPhone('');
+    setNewCustomerEmail('');
+    setNewCustomerAddress('');
+
+    setQuantity('1');
+    setNotes('');
+
+    setPaymentMethod('cash');
+    setBankName('');
+    setReferenceNumber('');
+    setDepositAmount('');
+    setFullPayment(true);
+  };
+
+  const handleClose = () => {
+    resetForm();
+    onClose();
+  };
+
+  const loadCustomers = async () => {
+    try {
+      setLoadingCustomers(true);
+
+      const response = await customerApi.getCustomers('', 100, 0);
+      setAllCustomers(response.data?.data || []);
+    } catch (error) {
+      console.error('Error loading customers:', error);
+
+      if (customers.length > 0) {
+        setAllCustomers(customers);
+      }
+    } finally {
+      setLoadingCustomers(false);
+    }
+  };
 
   useEffect(() => {
-    if (!visible) return;
-
-    resetCustomerState();
-    fetchCustomersFromBackend('');
+    if (visible) {
+      resetForm();
+      loadCustomers();
+    }
   }, [visible]);
 
   useEffect(() => {
-    if (!visible || showNewCustomerForm) return;
-
-    const timeout = setTimeout(() => {
-      fetchCustomersFromBackend(customerSearch);
-    }, customerSearch.trim() ? 300 : 0);
-
-    return () => clearTimeout(timeout);
-  }, [customerSearch, visible, showNewCustomerForm]);
+    if (itemType === 'vehicle') {
+      setQuantity('1');
+    }
+  }, [itemType]);
 
   useEffect(() => {
     if (fullPayment && totalAmount > 0) {
-      setDepositAmount(totalAmount.toString());
+      setDepositAmount(String(totalAmount));
     }
-  }, [totalAmount, fullPayment]);
+  }, [fullPayment, totalAmount]);
 
-  const resetCustomerState = () => {
-    setCustomerSearch('');
-    setSelectedCustomer(null);
-    setModalCustomers(customers || []);
-  };
-
-  const fetchCustomersFromBackend = async (searchText: string) => {
-    try {
-      setSearchingCustomers(true);
-
-      const response = await customerApi.getCustomers(searchText, 100, 0);
-
-      console.log('CUSTOMERS API RESPONSE:', response.data);
-
-      const result = response?.data?.data || [];
-
-      if (Array.isArray(result)) {
-        setModalCustomers(result);
-      } else {
-        setModalCustomers([]);
-      }
-    } catch (error: any) {
-      console.log('CUSTOMERS API ERROR:', {
-        status: error.response?.status,
-        data: error.response?.data,
-        url: error.config?.url,
-        params: error.config?.params,
-        message: error.message,
-      });
-
-      const searchLower = searchText.trim().toLowerCase();
-
-      if (!searchLower) {
-        setModalCustomers(customers || []);
-      } else {
-        const localResults = (customers || []).filter((customer) => {
-          const name = customer.full_name?.toLowerCase() || '';
-          const phone = customer.phone?.toLowerCase() || '';
-          const email = customer.email?.toLowerCase() || '';
-
-          return (
-            name.includes(searchLower) ||
-            phone.includes(searchLower) ||
-            email.includes(searchLower)
-          );
-        });
-
-        setModalCustomers(localResults);
-      }
-    } finally {
-      setSearchingCustomers(false);
-    }
-  };
-
-  const createNewCustomer = async (): Promise<string | null> => {
+  const createNewCustomer = async (): Promise<Customer | null> => {
     if (!newCustomerName.trim()) {
       Alert.alert('Error', 'Customer name is required');
       return null;
@@ -172,186 +201,198 @@ export default function RequestSaleModal({
         full_name: newCustomerName.trim(),
         phone: newCustomerPhone.trim() || null,
         email: newCustomerEmail.trim() || null,
+        address: newCustomerAddress.trim() || null,
       });
+
+      const createdCustomer = response.data?.data;
+
+      if (!createdCustomer?.id) {
+        Alert.alert('Error', 'Customer was created but no ID was returned');
+        return null;
+      }
+
+      const normalizedCustomer: Customer = {
+        id: createdCustomer.id,
+        full_name: createdCustomer.full_name,
+        phone: createdCustomer.phone || '',
+        email: createdCustomer.email || '',
+        address: createdCustomer.address || '',
+      };
+
+      setAllCustomers((prev) => [normalizedCustomer, ...prev]);
+      setSelectedCustomer(normalizedCustomer);
+      setShowNewCustomerForm(false);
+
+      setNewCustomerName('');
+      setNewCustomerPhone('');
+      setNewCustomerEmail('');
+      setNewCustomerAddress('');
 
       Alert.alert('Success', 'Customer created successfully');
 
-      await fetchCustomersFromBackend('');
-
-      return response.data.data.id;
+      return normalizedCustomer;
     } catch (error: any) {
+      console.error('Create customer error:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+      });
+
       Alert.alert(
         'Error',
         error.response?.data?.error || 'Failed to create customer'
       );
+
       return null;
     } finally {
       setCreatingCustomer(false);
     }
   };
 
-  const resetForm = () => {
-    setSelectedCustomer(null);
-    setShowNewCustomerForm(false);
-    setCustomerSearch('');
-    setModalCustomers(customers || []);
+  const validateForm = () => {
+    if (!item) {
+      Alert.alert('Error', 'No item selected');
+      return false;
+    }
 
-    setNewCustomerName('');
-    setNewCustomerPhone('');
-    setNewCustomerEmail('');
+    if (!selectedCustomer && !showNewCustomerForm) {
+      Alert.alert('Error', 'Please select a customer or create a new one');
+      return false;
+    }
 
-    setQuantity('1');
-    setNotes('');
+    if (showNewCustomerForm && !newCustomerName.trim()) {
+      Alert.alert('Error', 'Customer name is required');
+      return false;
+    }
 
-    setPaymentMethod('transfer');
-    setBankName('');
-    setReferenceNumber('');
-    setDepositAmount('');
-    setFullPayment(true);
-  };
+    if (itemType === 'part') {
+      const qty = toNumber(quantity);
 
-  const handleClose = () => {
-    Keyboard.dismiss();
-    resetForm();
-    onClose();
+      if (!qty || qty <= 0) {
+        Alert.alert('Error', 'Please enter a valid quantity');
+        return false;
+      }
+
+      if (qty > maxQuantity) {
+        Alert.alert(
+          'Error',
+          `Only ${maxQuantity} units are available for this part`
+        );
+        return false;
+      }
+    }
+
+    if (!depositAmount.trim()) {
+      Alert.alert('Error', 'Please enter the payment amount');
+      return false;
+    }
+
+    if (paidAmount <= 0) {
+      Alert.alert('Error', 'Payment amount must be greater than 0');
+      return false;
+    }
+
+    if (paidAmount > totalAmount) {
+      Alert.alert('Error', 'Payment amount cannot be greater than total amount');
+      return false;
+    }
+
+    if (paymentMethod !== 'cash' && !referenceNumber.trim()) {
+      Alert.alert('Error', 'Reference number is required for non-cash payments');
+      return false;
+    }
+
+    return true;
   };
 
   const handleSubmit = async () => {
-    if (!item) {
-      Alert.alert('Error', 'No item selected');
-      return;
-    }
-
-    if (!selectedCustomer && !newCustomerName.trim()) {
-      Alert.alert('Error', 'Please select or add a customer');
-      return;
-    }
-
-    if (!quantity || safeQuantity <= 0) {
-      Alert.alert('Error', 'Please enter a valid quantity');
-      return;
-    }
-
-    if (safeQuantity > item.quantity) {
-      Alert.alert('Error', `Only ${item.quantity} units available`);
-      return;
-    }
-
-    const parsedDepositAmount = Number.parseFloat(depositAmount || '0');
-
-    if (
-      !depositAmount ||
-      parsedDepositAmount <= 0 ||
-      Number.isNaN(parsedDepositAmount)
-    ) {
-      Alert.alert('Error', 'Please enter deposit amount');
-      return;
-    }
-
-    if (parsedDepositAmount > totalAmount) {
-      Alert.alert('Error', 'Deposit amount cannot be greater than total amount');
-      return;
-    }
-
-    if (paymentMethod !== 'cash' && !bankName.trim()) {
-      Alert.alert('Error', 'Please enter bank name');
-      return;
-    }
-
-    if (
-      (paymentMethod === 'transfer' || paymentMethod === 'check') &&
-      !referenceNumber.trim()
-    ) {
-      Alert.alert('Error', 'Please enter reference/check number');
-      return;
-    }
+    if (!validateForm() || !item) return;
 
     setLoading(true);
 
     try {
-      let customerId = selectedCustomer?.id;
+      let customer = selectedCustomer;
 
-      if (!customerId && newCustomerName.trim()) {
-        const newId = await createNewCustomer();
+      if (showNewCustomerForm) {
+        customer = await createNewCustomer();
 
-        if (!newId) {
+        if (!customer) {
           setLoading(false);
           return;
         }
-
-        customerId = newId;
       }
 
-      if (!customerId) {
-        Alert.alert('Error', 'Customer ID not found');
+      if (!customer?.id) {
+        Alert.alert('Error', 'Customer is required');
         setLoading(false);
         return;
       }
 
-      const orderData: any = {
-        customer_id: customerId,
+      const workerUserId = getUserId(user);
+      const workerDisplayName = getUserDisplayName(user);
+
+      if (!workerUserId) {
+        Alert.alert(
+          'Login Required',
+          'Could not find the logged-in worker ID. Please log out and log in again.'
+        );
+        setLoading(false);
+        return;
+      }
+
+      const itemId =
+        itemType === 'vehicle'
+          ? item.vehicle_id || item.id
+          : item.part_id || item.id;
+
+      const orderItem = {
+        item_type: itemType,
+        item_id: itemId,
+        quantity: selectedQuantity,
+        unit_price: toNumber(item.unit_price),
+      };
+
+      const payload: any = {
+        customer_id: customer.id,
         notes: notes.trim() || null,
+
         payment_method: paymentMethod,
-        bank_name: paymentMethod === 'cash' ? null : bankName.trim(),
+        bank_name: paymentMethod === 'cash' ? null : bankName.trim() || null,
         reference_number:
           paymentMethod === 'cash' ? null : referenceNumber.trim() || null,
-        deposit_amount: parsedDepositAmount,
+        deposit_amount: paidAmount,
+
+        quantity: selectedQuantity,
+        unit_price: toNumber(item.unit_price),
+
+        // Important:
+        // performed_by must be the worker UUID.
+        // performed_by_name is the display name used in history.
+        performed_by: workerUserId,
+        performed_by_name: workerDisplayName,
+
+        items: [orderItem],
       };
 
       if (itemType === 'vehicle') {
-        if (!item.chassis_number) {
-          Alert.alert('Error', 'Vehicle chassis number is missing');
-          setLoading(false);
-          return;
-        }
-
-        orderData.chassis_number = item.chassis_number;
-        orderData.quantity = safeQuantity;
-      }
-
-      if (itemType === 'part') {
-        const partId = item.part_id || item.id;
-
-        if (!partId && !item.part_number) {
-          Alert.alert('Error', 'Part ID or part number is missing');
-          setLoading(false);
-          return;
-        }
-
-        orderData.items = [
-          {
-            item_type: 'part',
-            item_id: partId,
-            part_number: item.part_number || null,
-            quantity: safeQuantity,
-          },
-        ];
-      }
-
-      console.log('SELECTED ITEM:', JSON.stringify(item, null, 2));
-      console.log('ORDER DATA BEING SENT:', JSON.stringify(orderData, null, 2));
-
-      const response = await salesApi.createSalesOrder(orderData);
-
-      const orderNumber =
-        response?.data?.data?.order_number ||
-        response?.data?.data?.id ||
-        'created';
-
-      if (fullPayment) {
-        Alert.alert(
-          'Order Created',
-          `Order ${orderNumber} created with full payment!\n\nThe order has been sent to Admin for approval.`
-        );
+        payload.vehicle_id = itemId;
       } else {
-        Alert.alert(
-          'Order Created',
-          `Order ${orderNumber} created with partial deposit.\n\nAdd more payments in "My Requests" tab. Once fully paid, confirm to send to Admin.`
-        );
+        payload.part_id = itemId;
       }
 
-      onSuccess();
+      console.log('Creating sales order payload:', JSON.stringify(payload));
+
+      await salesApi.createSalesOrder(payload);
+
+      Alert.alert(
+        'Success',
+        isFullyPaid
+          ? 'Sale request submitted for admin approval'
+          : `Sale request saved. Remaining amount: ${formatMoney(remainingAmount)}`
+      );
+
       resetForm();
+      onSuccess();
       onClose();
     } catch (error: any) {
       console.error('Error creating order:', {
@@ -360,6 +401,7 @@ export default function RequestSaleModal({
         requestData: error.config?.data,
         url: error.config?.url,
         params: error.config?.params,
+        message: error.message,
       });
 
       Alert.alert(
@@ -371,24 +413,7 @@ export default function RequestSaleModal({
     }
   };
 
-  const getPaymentMethodLabel = (method: string) => {
-    switch (method) {
-      case 'cash':
-        return '💰 Cash';
-      case 'transfer':
-        return '🏦 Bank Transfer';
-      case 'check':
-        return '📝 Check';
-      case 'bank_deposit':
-        return '🏛️ Bank Deposit';
-      default:
-        return method;
-    }
-  };
-
   if (!item) return null;
-
-  const remainingAmount = totalAmount - Number.parseFloat(depositAmount || '0');
 
   return (
     <Modal
@@ -397,272 +422,357 @@ export default function RequestSaleModal({
       transparent
       onRequestClose={handleClose}
     >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.modalOverlay}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 40 : 0}
-      >
-        <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Request Sale</Text>
-
-              <TouchableOpacity onPress={handleClose} style={styles.closeButton}>
-                <Text style={styles.closeButtonText}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView
-              showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
-              contentContainerStyle={styles.scrollContent}
-              nestedScrollEnabled
-            >
-              <View style={styles.infoSection}>
-                <Text style={styles.sectionTitle}>Item Details</Text>
-
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Sales type:</Text>
-                  <Text style={styles.infoValue}>{item.name}</Text>
-                </View>
-
-                {itemType === 'vehicle' && item.chassis_number ? (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Chassis no:</Text>
-                    <Text style={styles.infoValue}>{item.chassis_number}</Text>
-                  </View>
-                ) : null}
-
-                {itemType === 'part' && item.part_number ? (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Part no:</Text>
-                    <Text style={styles.infoValue}>{item.part_number}</Text>
-                  </View>
-                ) : null}
-
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Unit price:</Text>
-                  <Text style={styles.infoValue}>
-                    Br {Number(item.unit_price || 0).toLocaleString()}
+      <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+        <View style={styles.modalOverlay}>
+          <KeyboardAvoidingView
+            style={styles.keyboardView}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <View style={styles.headerTextContainer}>
+                  <Text style={styles.modalTitle}>Request Sale</Text>
+                  <Text style={styles.modalSubtitle} numberOfLines={1}>
+                    {item.name}
                   </Text>
                 </View>
 
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Quantity:</Text>
-                  <TextInput
-                    style={styles.quantityInput}
-                    value={quantity}
-                    onChangeText={setQuantity}
-                    keyboardType="numeric"
-                    placeholder="1"
-                    placeholderTextColor="#64748b"
-                  />
-                </View>
-
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Total:</Text>
-                  <Text style={styles.totalValue}>
-                    Br {totalAmount.toLocaleString()}
-                  </Text>
-                </View>
+                <TouchableOpacity style={styles.closeButton} onPress={handleClose}>
+                  <Text style={styles.closeButtonText}>✕</Text>
+                </TouchableOpacity>
               </View>
 
-              <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Customer Information</Text>
+              <ScrollView
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator={false}
+                contentContainerStyle={styles.scrollContent}
+              >
+                <View style={styles.itemCard}>
+                  <Text style={styles.itemType}>
+                    {itemType === 'vehicle' ? '🚛 Vehicle' : '🔧 Part'}
+                  </Text>
 
-                {!showNewCustomerForm ? (
-                  <>
-                    <View style={styles.searchContainer}>
-                      <Text style={styles.searchIcon}>🔍</Text>
+                  <Text style={styles.itemName}>{item.name}</Text>
 
-                      <TextInput
-                        style={styles.searchInput}
-                        placeholder="Search existing customers..."
-                        placeholderTextColor="#64748b"
-                        value={customerSearch}
-                        onChangeText={(text) => {
-                          setCustomerSearch(text);
-                          setSelectedCustomer(null);
-                        }}
-                        autoCorrect={false}
-                      />
+                  {item.specifications ? (
+                    <Text style={styles.itemSpecs} numberOfLines={2}>
+                      {item.specifications}
+                    </Text>
+                  ) : null}
 
-                      {customerSearch !== '' ? (
-                        <TouchableOpacity
-                          onPress={() => {
-                            setCustomerSearch('');
-                            setSelectedCustomer(null);
-                            fetchCustomersFromBackend('');
-                          }}
-                        >
-                          <Text style={styles.clearIcon}>✕</Text>
-                        </TouchableOpacity>
+                  {item.chassis_number ? (
+                    <Text style={styles.itemCode}>Chassis: {item.chassis_number}</Text>
+                  ) : null}
+
+                  {item.part_number ? (
+                    <Text style={styles.itemCode}>Part #: {item.part_number}</Text>
+                  ) : null}
+
+                  <View style={styles.itemSummaryRow}>
+                    <View style={styles.summaryBox}>
+                      <Text style={styles.summaryLabel}>Unit Price</Text>
+                      <Text style={styles.summaryValue}>
+                        {formatMoney(toNumber(item.unit_price))}
+                      </Text>
+                    </View>
+
+                    <View style={styles.summaryBox}>
+                      <Text style={styles.summaryLabel}>Available</Text>
+                      <Text style={styles.summaryValue}>
+                        {itemType === 'vehicle' ? 1 : maxQuantity}
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+
+                <Text style={styles.sectionTitle}>Customer</Text>
+
+                {selectedCustomer ? (
+                  <View style={styles.selectedCustomerBox}>
+                    <View style={styles.selectedCustomerInfo}>
+                      <Text style={styles.selectedCustomerName}>
+                        {selectedCustomer.full_name}
+                      </Text>
+
+                      {selectedCustomer.phone ? (
+                        <Text style={styles.selectedCustomerSub}>
+                          📞 {selectedCustomer.phone}
+                        </Text>
+                      ) : null}
+
+                      {selectedCustomer.email ? (
+                        <Text style={styles.selectedCustomerSub}>
+                          ✉️ {selectedCustomer.email}
+                        </Text>
                       ) : null}
                     </View>
 
-                    <ScrollView
-                      style={styles.customerListContainer}
-                      nestedScrollEnabled
-                      showsVerticalScrollIndicator
-                      keyboardShouldPersistTaps="handled"
-                    >
-                      {searchingCustomers ? (
-                        <View style={styles.searchingContainer}>
-                          <ActivityIndicator size="small" color="#ef4444" />
-                          <Text style={styles.searchingText}>
-                            Loading customers...
-                          </Text>
-                        </View>
-                      ) : modalCustomers.length === 0 ? (
-                        <Text style={styles.noCustomersText}>No customers found</Text>
-                      ) : (
-                        modalCustomers.map((customer) => (
-                          <TouchableOpacity
-                            key={customer.id}
-                            style={[
-                              styles.customerItem,
-                              selectedCustomer?.id === customer.id &&
-                                styles.customerItemSelected,
-                            ]}
-                            onPress={() => {
-                              setSelectedCustomer(customer);
-                              Keyboard.dismiss();
-                            }}
-                          >
-                            <View style={styles.customerItemContent}>
-                              <Text style={styles.customerItemName}>
-                                {customer.full_name}
-                              </Text>
-
-                              {customer.phone ? (
-                                <Text style={styles.customerItemPhone}>
-                                  📞 {customer.phone}
-                                </Text>
-                              ) : null}
-
-                              {customer.email ? (
-                                <Text style={styles.customerItemPhone}>
-                                  ✉️ {customer.email}
-                                </Text>
-                              ) : null}
-                            </View>
-
-                            {selectedCustomer?.id === customer.id ? (
-                              <Text style={styles.checkMark}>✓</Text>
-                            ) : null}
-                          </TouchableOpacity>
-                        ))
-                      )}
-                    </ScrollView>
-
                     <TouchableOpacity
-                      style={styles.newCustomerButton}
-                      onPress={() => {
-                        setSelectedCustomer(null);
-                        setShowNewCustomerForm(true);
-                      }}
+                      style={styles.changeCustomerButton}
+                      onPress={() => setSelectedCustomer(null)}
                     >
-                      <Text style={styles.newCustomerButtonText}>
-                        + Add New Customer
-                      </Text>
-                    </TouchableOpacity>
-                  </>
-                ) : (
-                  <View style={styles.newCustomerForm}>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="Customer Name *"
-                      placeholderTextColor="#64748b"
-                      value={newCustomerName}
-                      onChangeText={setNewCustomerName}
-                    />
-
-                    <TextInput
-                      style={styles.input}
-                      placeholder="Phone Number"
-                      placeholderTextColor="#64748b"
-                      value={newCustomerPhone}
-                      onChangeText={setNewCustomerPhone}
-                      keyboardType="phone-pad"
-                    />
-
-                    <TextInput
-                      style={styles.input}
-                      placeholder="Email"
-                      placeholderTextColor="#64748b"
-                      value={newCustomerEmail}
-                      onChangeText={setNewCustomerEmail}
-                      keyboardType="email-address"
-                      autoCapitalize="none"
-                    />
-
-                    <TouchableOpacity
-                      style={styles.backButton}
-                      onPress={() => {
-                        setShowNewCustomerForm(false);
-                        fetchCustomersFromBackend(customerSearch);
-                      }}
-                    >
-                      <Text style={styles.backButtonText}>
-                        ← Back to Customer List
-                      </Text>
+                      <Text style={styles.changeCustomerText}>Change</Text>
                     </TouchableOpacity>
                   </View>
-                )}
-              </View>
-
-              <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Payment Details</Text>
-
-                <View style={styles.paymentMethodRow}>
-                  {(['cash', 'transfer', 'check', 'bank_deposit'] as const).map(
-                    (method) => (
+                ) : (
+                  <>
+                    <View style={styles.customerModeRow}>
                       <TouchableOpacity
-                        key={method}
                         style={[
-                          styles.paymentChip,
-                          paymentMethod === method && styles.paymentChipSelected,
+                          styles.customerModeButton,
+                          !showNewCustomerForm && styles.customerModeButtonActive,
                         ]}
-                        onPress={() => {
-                          setPaymentMethod(method);
-
-                          if (method === 'cash') {
-                            setBankName('');
-                            setReferenceNumber('');
-                          }
-                        }}
+                        onPress={() => setShowNewCustomerForm(false)}
                       >
                         <Text
                           style={[
-                            styles.paymentChipText,
-                            paymentMethod === method &&
-                              styles.paymentChipTextSelected,
+                            styles.customerModeText,
+                            !showNewCustomerForm && styles.customerModeTextActive,
                           ]}
                         >
-                          {getPaymentMethodLabel(method)}
+                          Existing
                         </Text>
                       </TouchableOpacity>
-                    )
-                  )}
+
+                      <TouchableOpacity
+                        style={[
+                          styles.customerModeButton,
+                          showNewCustomerForm && styles.customerModeButtonActive,
+                        ]}
+                        onPress={() => setShowNewCustomerForm(true)}
+                      >
+                        <Text
+                          style={[
+                            styles.customerModeText,
+                            showNewCustomerForm && styles.customerModeTextActive,
+                          ]}
+                        >
+                          New Customer
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    {!showNewCustomerForm ? (
+                      <>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="Search customers by name, phone, or email..."
+                          placeholderTextColor="#64748b"
+                          value={customerSearch}
+                          onChangeText={setCustomerSearch}
+                        />
+
+                        {loadingCustomers ? (
+                          <View style={styles.smallLoadingBox}>
+                            <ActivityIndicator size="small" color="#ef4444" />
+                            <Text style={styles.smallLoadingText}>Loading customers...</Text>
+                          </View>
+                        ) : filteredCustomers.length === 0 ? (
+                          <View style={styles.emptyCustomerBox}>
+                            <Text style={styles.emptyCustomerText}>No customers found</Text>
+
+                            <TouchableOpacity
+                              style={styles.createCustomerInlineButton}
+                              onPress={() => setShowNewCustomerForm(true)}
+                            >
+                              <Text style={styles.createCustomerInlineText}>
+                                + Create Customer
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        ) : (
+                          <View style={styles.customerList}>
+                            {filteredCustomers.slice(0, 8).map((customer) => (
+                              <TouchableOpacity
+                                key={customer.id}
+                                style={styles.customerOption}
+                                onPress={() => setSelectedCustomer(customer)}
+                              >
+                                <Text style={styles.customerOptionName}>
+                                  {customer.full_name}
+                                </Text>
+
+                                <Text style={styles.customerOptionSub} numberOfLines={1}>
+                                  {customer.phone || 'No phone'} • {customer.email || 'No email'}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        )}
+                      </>
+                    ) : (
+                      <View style={styles.newCustomerForm}>
+                        <Text style={styles.inputLabel}>Full Name *</Text>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="Customer full name"
+                          placeholderTextColor="#64748b"
+                          value={newCustomerName}
+                          onChangeText={setNewCustomerName}
+                        />
+
+                        <Text style={styles.inputLabel}>Phone</Text>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="Phone number"
+                          placeholderTextColor="#64748b"
+                          value={newCustomerPhone}
+                          onChangeText={setNewCustomerPhone}
+                          keyboardType="phone-pad"
+                        />
+
+                        <Text style={styles.inputLabel}>Email</Text>
+                        <TextInput
+                          style={styles.input}
+                          placeholder="Email address"
+                          placeholderTextColor="#64748b"
+                          value={newCustomerEmail}
+                          onChangeText={setNewCustomerEmail}
+                          keyboardType="email-address"
+                          autoCapitalize="none"
+                        />
+
+                        <Text style={styles.inputLabel}>Address</Text>
+                        <TextInput
+                          style={[styles.input, styles.notesInput]}
+                          placeholder="Address"
+                          placeholderTextColor="#64748b"
+                          value={newCustomerAddress}
+                          onChangeText={setNewCustomerAddress}
+                          multiline
+                        />
+                      </View>
+                    )}
+                  </>
+                )}
+
+                <Text style={styles.sectionTitle}>Sale Details</Text>
+
+                {itemType === 'part' ? (
+                  <>
+                    <Text style={styles.inputLabel}>Quantity</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="Quantity"
+                      placeholderTextColor="#64748b"
+                      value={quantity}
+                      onChangeText={(text) => {
+                        const cleanText = text.replace(/[^0-9]/g, '');
+                        setQuantity(cleanText);
+                      }}
+                      keyboardType="numeric"
+                    />
+                  </>
+                ) : (
+                  <View style={styles.vehicleQuantityBox}>
+                    <Text style={styles.vehicleQuantityText}>
+                      Vehicle quantity is fixed to 1
+                    </Text>
+                  </View>
+                )}
+
+                <View style={styles.totalBox}>
+                  <View>
+                    <Text style={styles.totalLabel}>Total Amount</Text>
+                    <Text style={styles.totalValue}>{formatMoney(totalAmount)}</Text>
+                  </View>
+
+                  <View style={styles.statusBox}>
+                    <Text
+                      style={[
+                        styles.statusText,
+                        isFullyPaid ? styles.fullyPaidText : styles.partialPaidText,
+                      ]}
+                    >
+                      {isFullyPaid ? 'Full Payment' : 'Partial Payment'}
+                    </Text>
+                  </View>
+                </View>
+
+                <Text style={styles.sectionTitle}>Payment</Text>
+
+                <View style={styles.paymentToggleRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.paymentToggleButton,
+                      fullPayment && styles.paymentToggleActive,
+                    ]}
+                    onPress={() => setFullPayment(true)}
+                  >
+                    <Text
+                      style={[
+                        styles.paymentToggleText,
+                        fullPayment && styles.paymentToggleTextActive,
+                      ]}
+                    >
+                      Full
+                    </Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.paymentToggleButton,
+                      !fullPayment && styles.paymentToggleActive,
+                    ]}
+                    onPress={() => {
+                      setFullPayment(false);
+                      setDepositAmount('');
+                    }}
+                  >
+                    <Text
+                      style={[
+                        styles.paymentToggleText,
+                        !fullPayment && styles.paymentToggleTextActive,
+                      ]}
+                    >
+                      Partial
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <Text style={styles.inputLabel}>Payment Method</Text>
+                <View style={styles.methodGrid}>
+                  {[
+                    { value: 'cash', label: 'Cash' },
+                    { value: 'transfer', label: 'Transfer' },
+                    { value: 'bank_deposit', label: 'Bank Deposit' },
+                    { value: 'check', label: 'Check' },
+                  ].map((method) => (
+                    <TouchableOpacity
+                      key={method.value}
+                      style={[
+                        styles.methodButton,
+                        paymentMethod === method.value && styles.methodButtonActive,
+                      ]}
+                      onPress={() => setPaymentMethod(method.value as PaymentMethod)}
+                    >
+                      <Text
+                        style={[
+                          styles.methodText,
+                          paymentMethod === method.value && styles.methodTextActive,
+                        ]}
+                      >
+                        {method.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
                 </View>
 
                 {paymentMethod !== 'cash' ? (
                   <>
+                    <Text style={styles.inputLabel}>Bank Name</Text>
                     <TextInput
                       style={styles.input}
-                      placeholder="Bank Name"
+                      placeholder="Bank name"
                       placeholderTextColor="#64748b"
                       value={bankName}
                       onChangeText={setBankName}
                     />
 
+                    <Text style={styles.inputLabel}>Reference Number *</Text>
                     <TextInput
                       style={styles.input}
-                      placeholder={
-                        paymentMethod === 'check'
-                          ? 'Check Number'
-                          : 'Reference Number'
-                      }
+                      placeholder="Reference / check number"
                       placeholderTextColor="#64748b"
                       value={referenceNumber}
                       onChangeText={setReferenceNumber}
@@ -670,117 +780,86 @@ export default function RequestSaleModal({
                   </>
                 ) : null}
 
-                <View style={styles.depositRow}>
-                  <View style={styles.depositOptions}>
-                    <TouchableOpacity
-                      style={[
-                        styles.depositOption,
-                        fullPayment && styles.depositOptionSelected,
-                      ]}
-                      onPress={() => setFullPayment(true)}
-                    >
-                      <Text
-                        style={[
-                          styles.depositOptionText,
-                          fullPayment && styles.depositOptionTextSelected,
-                        ]}
-                      >
-                        Full Payment
-                      </Text>
-                    </TouchableOpacity>
+                <Text style={styles.inputLabel}>Amount Paid / Submitted *</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Amount paid"
+                  placeholderTextColor="#64748b"
+                  value={depositAmount}
+                  onChangeText={(text) => {
+                    setFullPayment(false);
+                    setDepositAmount(text.replace(/[^0-9.]/g, ''));
+                  }}
+                  keyboardType="decimal-pad"
+                  editable={!fullPayment}
+                />
 
-                    <TouchableOpacity
-                      style={[
-                        styles.depositOption,
-                        !fullPayment && styles.depositOptionSelected,
-                      ]}
-                      onPress={() => setFullPayment(false)}
-                    >
-                      <Text
-                        style={[
-                          styles.depositOptionText,
-                          !fullPayment && styles.depositOptionTextSelected,
-                        ]}
-                      >
-                        Partial Deposit
-                      </Text>
-                    </TouchableOpacity>
+                <View style={styles.paymentSummaryBox}>
+                  <View style={styles.paymentSummaryRow}>
+                    <Text style={styles.paymentSummaryLabel}>Paid / Submitted</Text>
+                    <Text style={styles.paymentSummaryPaid}>
+                      {formatMoney(paidAmount)}
+                    </Text>
                   </View>
 
-                  <TextInput
-                    style={styles.input}
-                    placeholder="Deposit Amount"
-                    placeholderTextColor="#64748b"
-                    value={depositAmount}
-                    onChangeText={setDepositAmount}
-                    keyboardType="numeric"
-                  />
-
-                  {!fullPayment ? (
-                    <Text style={styles.remainingText}>
-                      Remaining: Br {remainingAmount.toLocaleString()}
+                  <View style={styles.paymentSummaryRow}>
+                    <Text style={styles.paymentSummaryLabel}>Need to Pay</Text>
+                    <Text
+                      style={[
+                        styles.paymentSummaryRemaining,
+                        remainingAmount === 0 && styles.paymentSummaryPaid,
+                      ]}
+                    >
+                      {remainingAmount > 0 ? formatMoney(remainingAmount) : 'Fully paid'}
                     </Text>
-                  ) : null}
+                  </View>
+
+                  <Text style={styles.paymentSummaryNote}>
+                    {isFullyPaid
+                      ? 'This request will go to admin approval.'
+                      : 'This request will stay pending payment and reserve the item.'}
+                  </Text>
                 </View>
-              </View>
 
-              <View style={styles.section}>
-                <Text style={styles.sectionTitle}>Notes</Text>
-
+                <Text style={styles.inputLabel}>Notes</Text>
                 <TextInput
-                  style={styles.notesInput}
-                  placeholder="Add notes..."
+                  style={[styles.input, styles.notesInput]}
+                  placeholder="Optional notes"
                   placeholderTextColor="#64748b"
                   value={notes}
                   onChangeText={setNotes}
                   multiline
-                  numberOfLines={3}
-                  textAlignVertical="top"
                 />
-              </View>
 
-              <View style={styles.infoBox}>
-                <Text style={styles.infoBoxTitle}>📋 What happens next?</Text>
+                <View style={styles.buttonRow}>
+                  <TouchableOpacity
+                    style={styles.cancelButton}
+                    onPress={handleClose}
+                    disabled={loading || creatingCustomer}
+                  >
+                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                  </TouchableOpacity>
 
-                <Text style={styles.infoBoxText}>
-                  • Order will be created after this request is submitted
-                </Text>
-
-                <Text style={styles.infoBoxText}>
-                  • Payment will wait for admin confirmation
-                </Text>
-
-                <Text style={styles.infoBoxText}>
-                  • Items will be reserved/confirmed based on your approval workflow
-                </Text>
-              </View>
-
-              <View style={styles.modalButtons}>
-                <TouchableOpacity style={styles.cancelButton} onPress={handleClose}>
-                  <Text style={styles.cancelButtonText}>Cancel</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[
-                    styles.submitButton,
-                    (loading || creatingCustomer) && styles.submitButtonDisabled,
-                  ]}
-                  onPress={handleSubmit}
-                  disabled={loading || creatingCustomer}
-                >
-                  {loading || creatingCustomer ? (
-                    <ActivityIndicator size="small" color="#ffffff" />
-                  ) : (
-                    <Text style={styles.submitButtonText}>
-                      {fullPayment ? 'Submit & Send to Admin' : 'Submit Request'}
-                    </Text>
-                  )}
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-          </View>
-        </TouchableWithoutFeedback>
-      </KeyboardAvoidingView>
+                  <TouchableOpacity
+                    style={[
+                      styles.submitButton,
+                      (loading || creatingCustomer) && styles.disabledButton,
+                    ]}
+                    onPress={handleSubmit}
+                    disabled={loading || creatingCustomer}
+                  >
+                    {loading || creatingCustomer ? (
+                      <ActivityIndicator size="small" color="#ffffff" />
+                    ) : (
+                      <Text style={styles.submitButtonText}>Submit Request</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </TouchableWithoutFeedback>
     </Modal>
   );
 }
@@ -788,298 +867,404 @@ export default function RequestSaleModal({
 const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    justifyContent: 'flex-end',
+  },
+  keyboardView: {
+    flex: 1,
     justifyContent: 'flex-end',
   },
   modalContent: {
     backgroundColor: '#1e293b',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    padding: 20,
-    maxHeight: '85%',
+    maxHeight: '92%',
+    paddingTop: 18,
   },
   scrollContent: {
-    paddingBottom: 24,
+    paddingHorizontal: 20,
+    paddingBottom: 30,
   },
   modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-    paddingBottom: 12,
+    paddingHorizontal: 20,
+    paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: '#334155',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  headerTextContainer: {
+    flex: 1,
   },
   modalTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
     color: '#ffffff',
+    fontSize: 24,
+    fontWeight: 'bold',
+  },
+  modalSubtitle: {
+    color: '#94a3b8',
+    fontSize: 13,
+    marginTop: 4,
   },
   closeButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
     backgroundColor: '#334155',
-    justifyContent: 'center',
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
+    justifyContent: 'center',
   },
   closeButtonText: {
     color: '#94a3b8',
+    fontWeight: 'bold',
     fontSize: 16,
-    fontWeight: 'bold',
   },
-  section: {
-    marginBottom: 16,
-  },
-  infoSection: {
+  itemCard: {
     backgroundColor: '#0f172a',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 14,
-    marginBottom: 16,
     borderWidth: 1,
     borderColor: '#334155',
+    marginTop: 16,
+    marginBottom: 18,
   },
-  sectionTitle: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#94a3b8',
-    marginBottom: 10,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-    gap: 12,
-  },
-  infoLabel: {
-    fontSize: 13,
-    color: '#94a3b8',
-  },
-  infoValue: {
-    flex: 1,
-    fontSize: 13,
-    color: '#ffffff',
-    fontWeight: '500',
-    textAlign: 'right',
-  },
-  totalValue: {
-    fontSize: 15,
-    color: '#ef4444',
-    fontWeight: 'bold',
-  },
-  quantityInput: {
-    backgroundColor: '#1e293b',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    color: '#ffffff',
-    fontSize: 14,
-    borderWidth: 1,
-    borderColor: '#334155',
-    width: 70,
-    textAlign: 'center',
-  },
-  searchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#0f172a',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-    paddingHorizontal: 10,
-    marginBottom: 10,
-    minHeight: 42,
-  },
-  searchIcon: {
-    fontSize: 14,
-    marginRight: 8,
+  itemType: {
     color: '#64748b',
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 4,
+    textTransform: 'uppercase',
   },
-  searchInput: {
-    flex: 1,
-    paddingVertical: 8,
+  itemName: {
     color: '#ffffff',
-    fontSize: 14,
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 4,
   },
-  clearIcon: {
-    fontSize: 14,
-    color: '#64748b',
-    padding: 4,
-  },
-  customerListContainer: {
-    height: 150,
-    marginBottom: 10,
-    backgroundColor: '#0f172a',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#334155',
-  },
-  searchingContainer: {
-    height: 148,
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 8,
-  },
-  searchingText: {
+  itemSpecs: {
     color: '#94a3b8',
     fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 8,
   },
-  customerItem: {
+  itemCode: {
+    color: '#64748b',
+    fontSize: 11,
+    marginBottom: 3,
+    fontFamily: 'monospace',
+  },
+  itemSummaryRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#334155',
+    gap: 10,
+    marginTop: 10,
   },
-  customerItemSelected: {
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-  },
-  customerItemContent: {
+  summaryBox: {
     flex: 1,
-    paddingRight: 8,
+    backgroundColor: '#1e293b',
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
   },
-  customerItemName: {
-    fontSize: 14,
-    fontWeight: '500',
+  summaryLabel: {
+    color: '#64748b',
+    fontSize: 10,
+    marginBottom: 4,
+  },
+  summaryValue: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  sectionTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 12,
+    marginTop: 6,
+  },
+  customerModeRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 12,
+  },
+  customerModeButton: {
+    flex: 1,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  customerModeButtonActive: {
+    backgroundColor: '#ef4444',
+    borderColor: '#ef4444',
+  },
+  customerModeText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  customerModeTextActive: {
     color: '#ffffff',
   },
-  customerItemPhone: {
-    fontSize: 11,
-    color: '#64748b',
-    marginTop: 2,
-  },
-  checkMark: {
-    color: '#22c55e',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  noCustomersText: {
-    color: '#64748b',
+  inputLabel: {
+    color: '#94a3b8',
     fontSize: 13,
-    textAlign: 'center',
-    padding: 15,
-  },
-  newCustomerButton: {
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    paddingVertical: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.3)',
-    alignItems: 'center',
-  },
-  newCustomerButtonText: {
-    color: '#ef4444',
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  newCustomerForm: {
-    gap: 10,
+    fontWeight: '600',
+    marginBottom: 8,
   },
   input: {
     backgroundColor: '#0f172a',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#ffffff',
-    fontSize: 14,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: '#334155',
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    color: '#ffffff',
+    fontSize: 14,
+    marginBottom: 14,
+  },
+  notesInput: {
+    minHeight: 86,
+    textAlignVertical: 'top',
+  },
+  customerList: {
+    marginBottom: 14,
+    gap: 8,
+  },
+  customerOption: {
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 12,
+  },
+  customerOptionName: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 3,
+  },
+  customerOptionSub: {
+    color: '#94a3b8',
+    fontSize: 12,
+  },
+  selectedCustomerBox: {
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+    gap: 12,
+  },
+  selectedCustomerInfo: {
+    flex: 1,
+  },
+  selectedCustomerName: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  selectedCustomerSub: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  changeCustomerButton: {
+    backgroundColor: '#334155',
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  changeCustomerText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  emptyCustomerBox: {
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 14,
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  emptyCustomerText: {
+    color: '#94a3b8',
+    fontSize: 13,
     marginBottom: 10,
   },
-  backButton: {
-    alignItems: 'center',
+  createCustomerInlineButton: {
+    backgroundColor: '#ef4444',
+    paddingHorizontal: 12,
     paddingVertical: 8,
+    borderRadius: 8,
   },
-  backButtonText: {
-    color: '#ef4444',
-    fontSize: 14,
+  createCustomerInlineText: {
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: '700',
   },
-  paymentMethodRow: {
+  newCustomerForm: {
+    marginBottom: 12,
+  },
+  smallLoadingBox: {
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    padding: 14,
+    alignItems: 'center',
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  smallLoadingText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginTop: 8,
+  },
+  vehicleQuantityBox: {
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 12,
+    marginBottom: 14,
+  },
+  vehicleQuantityText: {
+    color: '#94a3b8',
+    fontSize: 13,
+  },
+  totalBox: {
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 14,
+    marginBottom: 18,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  totalLabel: {
+    color: '#64748b',
+    fontSize: 12,
+    marginBottom: 3,
+  },
+  totalValue: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: 'bold',
+  },
+  statusBox: {
+    backgroundColor: '#1e293b',
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  statusText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  fullyPaidText: {
+    color: '#22c55e',
+  },
+  partialPaidText: {
+    color: '#fbbf24',
+  },
+  paymentToggleRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 14,
+  },
+  paymentToggleButton: {
+    flex: 1,
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  paymentToggleActive: {
+    backgroundColor: '#ef4444',
+    borderColor: '#ef4444',
+  },
+  paymentToggleText: {
+    color: '#94a3b8',
+    fontWeight: '700',
+  },
+  paymentToggleTextActive: {
+    color: '#ffffff',
+  },
+  methodGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
     marginBottom: 14,
   },
-  paymentChip: {
-    backgroundColor: '#334155',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-  },
-  paymentChipSelected: {
-    backgroundColor: '#ef4444',
-  },
-  paymentChipText: {
-    color: '#94a3b8',
-    fontSize: 12,
-  },
-  paymentChipTextSelected: {
-    color: '#ffffff',
-  },
-  depositRow: {
-    marginTop: 6,
-  },
-  depositOptions: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 10,
-  },
-  depositOption: {
-    flex: 1,
-    backgroundColor: '#334155',
-    paddingVertical: 8,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  depositOptionSelected: {
-    backgroundColor: '#ef4444',
-  },
-  depositOptionText: {
-    color: '#94a3b8',
-    fontSize: 13,
-  },
-  depositOptionTextSelected: {
-    color: '#ffffff',
-  },
-  remainingText: {
-    fontSize: 11,
-    color: '#fbbf24',
-    marginTop: 6,
-    textAlign: 'right',
-  },
-  notesInput: {
+  methodButton: {
     backgroundColor: '#0f172a',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: '#ffffff',
-    fontSize: 14,
     borderWidth: 1,
     borderColor: '#334155',
-    minHeight: 70,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
   },
-  infoBox: {
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(59, 130, 246, 0.3)',
+  methodButtonActive: {
+    borderColor: '#ef4444',
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
   },
-  infoBoxTitle: {
+  methodText: {
+    color: '#94a3b8',
     fontSize: 12,
-    fontWeight: '600',
-    color: '#60a5fa',
+    fontWeight: '700',
+  },
+  methodTextActive: {
+    color: '#ef4444',
+  },
+  paymentSummaryBox: {
+    backgroundColor: '#0f172a',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#334155',
+    marginBottom: 16,
+  },
+  paymentSummaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     marginBottom: 6,
   },
-  infoBoxText: {
-    fontSize: 11,
+  paymentSummaryLabel: {
     color: '#94a3b8',
-    marginBottom: 3,
+    fontSize: 12,
   },
-  modalButtons: {
+  paymentSummaryPaid: {
+    color: '#22c55e',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  paymentSummaryRemaining: {
+    color: '#fbbf24',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  paymentSummaryNote: {
+    color: '#64748b',
+    fontSize: 11,
+    marginTop: 4,
+    lineHeight: 16,
+  },
+  buttonRow: {
     flexDirection: 'row',
     gap: 12,
     marginTop: 8,
@@ -1087,28 +1272,28 @@ const styles = StyleSheet.create({
   cancelButton: {
     flex: 1,
     backgroundColor: '#334155',
-    paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 10,
+    paddingVertical: 13,
     alignItems: 'center',
   },
   cancelButtonText: {
     color: '#ffffff',
+    fontWeight: '700',
     fontSize: 14,
-    fontWeight: '500',
   },
   submitButton: {
     flex: 1,
     backgroundColor: '#ef4444',
-    paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 10,
+    paddingVertical: 13,
     alignItems: 'center',
-  },
-  submitButtonDisabled: {
-    opacity: 0.5,
   },
   submitButtonText: {
     color: '#ffffff',
+    fontWeight: '700',
     fontSize: 14,
-    fontWeight: '600',
+  },
+  disabledButton: {
+    opacity: 0.6,
   },
 });

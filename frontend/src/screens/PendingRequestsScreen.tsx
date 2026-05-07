@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { salesApi, paymentApi } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
 interface PendingRequest {
   id: string;
@@ -50,6 +51,11 @@ const formatMoney = (value: number) => {
 
 const formatDate = (dateString: string) => {
   const date = new Date(dateString);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown';
+  }
+
   return date.toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
@@ -64,6 +70,14 @@ const getLatestPayment = (payments: any[]) => {
       new Date(b.created_at || 0).getTime() -
       new Date(a.created_at || 0).getTime()
   )[0];
+};
+
+const getUserId = (user: any) => {
+  return user?.id || user?.user_id || user?.uuid || null;
+};
+
+const getUserDisplayName = (user: any) => {
+  return user?.full_name || user?.name || user?.email || 'Admin';
 };
 
 const RequestCard = ({
@@ -184,6 +198,11 @@ const RequestCard = ({
             </Text>
           </View>
         </View>
+
+        <View style={styles.row}>
+          <Text style={styles.label}>Requested by</Text>
+          <Text style={styles.value}>{request.requested_by || 'Worker'}</Text>
+        </View>
       </View>
 
       {!isFullySubmitted ? (
@@ -236,10 +255,15 @@ const EmptyState = () => (
 );
 
 export default function PendingRequestsScreen() {
+  const { user } = useAuth();
+
   const [requests, setRequests] = useState<PendingRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [processingId, setProcessingId] = useState<string | null>(null);
+
+  const adminUserId = getUserId(user);
+  const adminDisplayName = getUserDisplayName(user);
 
   const loadRequests = async () => {
     try {
@@ -350,6 +374,14 @@ export default function PendingRequestsScreen() {
             ? 'Submitted / Waiting Verification'
             : 'Verified';
 
+        const requestedBy =
+          order.performed_by_name ||
+          orderDetails.performed_by_name ||
+          latestPayment?.performed_by_name ||
+          order.created_by_name ||
+          orderDetails.created_by_name ||
+          'Worker';
+
         pendingRequests.push({
           id: order.id,
           order_number: order.order_number,
@@ -361,14 +393,17 @@ export default function PendingRequestsScreen() {
           quantity: toNumber(firstItem?.quantity || 1),
           unit_price: unitPrice,
           total_amount: totalAmount,
-          deposit_bank: latestPayment?.bank_name || 'N/A',
+          deposit_bank:
+            latestPayment?.bank_name ||
+            latestPayment?.payment_method ||
+            'N/A',
           submitted_amount: totalSubmitted,
           confirmed_amount: totalConfirmed,
           pending_amount: totalPending,
           remaining_amount: remainingAmount,
           deposit_status: depositStatus,
           notes: order.notes || orderDetails.notes || '',
-          requested_by: orderDetails.confirmed_by || 'Worker',
+          requested_by: requestedBy,
           created_date: order.created_at || orderDetails.created_at,
           order_status: order.status,
           item_id: itemId,
@@ -393,7 +428,10 @@ export default function PendingRequestsScreen() {
         message: error.message,
       });
 
-      Alert.alert('Error', 'Failed to load pending requests');
+      Alert.alert(
+        'Error',
+        error.response?.data?.error || 'Failed to load pending requests'
+      );
     } finally {
       setLoading(false);
     }
@@ -415,6 +453,14 @@ export default function PendingRequestsScreen() {
     const request = requests.find((r) => r.id === requestId);
     if (!request) return;
 
+    if (!adminUserId) {
+      Alert.alert(
+        'Login Required',
+        'Could not find the logged-in admin ID. Please log out and log in again.'
+      );
+      return;
+    }
+
     if (request.submitted_amount < request.total_amount) {
       Alert.alert(
         'Payment Incomplete',
@@ -429,10 +475,19 @@ export default function PendingRequestsScreen() {
 
     try {
       for (const paymentId of request.pending_payment_ids) {
-        await paymentApi.confirmDeposit(paymentId);
+        await paymentApi.confirmDeposit(
+          paymentId,
+          adminUserId,
+          adminDisplayName
+        );
       }
 
-      await salesApi.updateOrderStatus(requestId, 'confirmed');
+      await salesApi.updateOrderStatus(
+        requestId,
+        'confirmed',
+        adminUserId,
+        adminDisplayName
+      );
 
       setRequests((prev) => prev.filter((r) => r.id !== requestId));
 
@@ -461,6 +516,14 @@ export default function PendingRequestsScreen() {
     const request = requests.find((r) => r.id === requestId);
     if (!request) return;
 
+    if (!adminUserId) {
+      Alert.alert(
+        'Login Required',
+        'Could not find the logged-in admin ID. Please log out and log in again.'
+      );
+      return;
+    }
+
     Alert.alert(
       'Reject Sale Request',
       `Are you sure you want to reject order ${request.order_number}? Reserved inventory will be released.`,
@@ -476,7 +539,14 @@ export default function PendingRequestsScreen() {
             setProcessingId(requestId);
 
             try {
-              await salesApi.updateOrderStatus(requestId, 'cancelled');
+              await salesApi.updateOrderStatus(
+                requestId,
+                'cancelled',
+                undefined,
+                undefined,
+                adminUserId,
+                adminDisplayName
+              );
 
               setRequests((prev) => prev.filter((r) => r.id !== requestId));
 

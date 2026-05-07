@@ -10,6 +10,7 @@ import {
   StatusBar,
   KeyboardAvoidingView,
   Platform,
+  Image,
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 
@@ -63,8 +64,12 @@ export default function LoginScreen() {
       <StatusBar barStyle="light-content" />
 
       <View style={styles.logoContainer}>
-        <Text style={styles.logoIcon}>🚛</Text>
-        <Text style={styles.appTitle}>Beast Vehicles</Text>
+        <Image
+          source={require('../../assets/Logo.png')}
+          style={styles.logoImage}
+          resizeMode="contain"
+        />
+        <Text style={styles.appTitle}>Best Vehicles</Text>
         <Text style={styles.appSubtitle}>Inventory & Sales Management</Text>
       </View>
 
@@ -140,9 +145,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 32,
   },
-  logoIcon: {
-    fontSize: 54,
-    marginBottom: 12,
+  logoImage: {
+    width: 220,
+    height: 140,
+    marginBottom: 14,
   },
   appTitle: {
     fontSize: 34,

@@ -17,16 +17,23 @@ interface Transaction {
   transaction_type?: string;
   quantity_change?: number;
   quantity_after?: number;
+
   performed_by?: string;
+  performed_by_name?: string | null;
+  confirmed_by?: string;
+  confirmed_by_name?: string | null;
+
   customer?: {
     full_name?: string;
     phone?: string;
   };
+
   sales_order?: {
     id?: string;
     order_number?: string;
   };
-  sales_order_id?: string;
+
+  sales_order_id?: string | null;
   notes?: string;
   created_at?: string;
 }
@@ -204,6 +211,18 @@ const getVehicleStatusAfter = (type: string) => {
   return 'Updated';
 };
 
+const getPerformedByName = (transaction: Transaction) => {
+  return (
+    transaction.performed_by_name ||
+    transaction.confirmed_by_name ||
+    'System'
+  );
+};
+
+const getConfirmedByName = (transaction: Transaction) => {
+  return transaction.confirmed_by_name || null;
+};
+
 const TransactionCard = ({
   transaction,
   itemType,
@@ -221,13 +240,16 @@ const TransactionCard = ({
   const quantityMoved = Math.abs(quantityChange);
 
   const isPositive = quantityChange > 0;
-  const performedBy = transaction.performed_by || 'System';
+  const performedBy = getPerformedByName(transaction);
+  const confirmedBy = getConfirmedByName(transaction);
   const notes = transaction.notes || '';
 
   const customerName =
     transaction.customer_name || transaction.customer?.full_name || '';
+
   const customerPhone =
     transaction.customer_phone || transaction.customer?.phone || '';
+
   const orderNumber =
     transaction.order_number || transaction.sales_order?.order_number || '';
 
@@ -238,6 +260,11 @@ const TransactionCard = ({
     itemType === 'vehicle'
       ? getVehicleStatusAfter(transactionType)
       : quantityAfter.toString();
+
+  const showQuantity =
+    itemType === 'part' ||
+    transaction.quantity_change !== undefined ||
+    transaction.quantity_after !== undefined;
 
   return (
     <View style={styles.transactionCard}>
@@ -253,32 +280,45 @@ const TransactionCard = ({
           </Text>
         </View>
 
-        <View style={styles.quantityContainer}>
-          <Text
-            style={[
-              styles.quantityChange,
-              isPositive ? styles.quantityPositive : styles.quantityNegative,
-            ]}
-          >
-            {quantityChange > 0 ? `+${quantityChange}` : quantityChange}
-          </Text>
+        {showQuantity ? (
+          <View style={styles.quantityContainer}>
+            <Text
+              style={[
+                styles.quantityChange,
+                isPositive ? styles.quantityPositive : styles.quantityNegative,
+              ]}
+            >
+              {quantityChange > 0 ? `+${quantityChange}` : quantityChange}
+            </Text>
 
-          <Text style={styles.quantityAfter}>→ {afterValue}</Text>
-        </View>
+            <Text style={styles.quantityAfter}>→ {afterValue}</Text>
+          </View>
+        ) : (
+          <View style={styles.quantityContainer}>
+            <Text style={styles.quantityAfter}>{afterValue}</Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.metricsGrid}>
-        <View style={styles.metricBox}>
-          <Text style={styles.metricLabel}>{getQuantityMovedLabel(transactionType)}</Text>
-          <Text style={styles.metricValue}>{quantityMoved}</Text>
-        </View>
+        {showQuantity ? (
+          <View style={styles.metricBox}>
+            <Text style={styles.metricLabel}>
+              {getQuantityMovedLabel(transactionType)}
+            </Text>
+            <Text style={styles.metricValue}>{quantityMoved}</Text>
+          </View>
+        ) : null}
 
         <View style={styles.metricBox}>
-          <Text style={styles.metricLabel}>{getAfterLabel(transactionType, itemType)}</Text>
+          <Text style={styles.metricLabel}>
+            {getAfterLabel(transactionType, itemType)}
+          </Text>
           <Text style={styles.metricValue}>{afterValue}</Text>
         </View>
 
-        {transaction.item_unit_price !== undefined && transaction.item_unit_price > 0 ? (
+        {transaction.item_unit_price !== undefined &&
+        transaction.item_unit_price > 0 ? (
           <View style={styles.metricBox}>
             <Text style={styles.metricLabel}>Unit price</Text>
             <Text style={styles.metricValueSmall}>
@@ -287,7 +327,8 @@ const TransactionCard = ({
           </View>
         ) : null}
 
-        {transaction.item_subtotal !== undefined && transaction.item_subtotal > 0 ? (
+        {transaction.item_subtotal !== undefined &&
+        transaction.item_subtotal > 0 ? (
           <View style={styles.metricBox}>
             <Text style={styles.metricLabel}>Line total</Text>
             <Text style={styles.metricValueSmall}>
@@ -303,6 +344,15 @@ const TransactionCard = ({
           Performed by: <Text style={styles.infoValue}>{performedBy}</Text>
         </Text>
       </View>
+
+      {confirmedBy ? (
+        <View style={styles.infoRow}>
+          <Text style={styles.infoIcon}>✅</Text>
+          <Text style={styles.infoText}>
+            Confirmed by: <Text style={styles.infoValue}>{confirmedBy}</Text>
+          </Text>
+        </View>
+      ) : null}
 
       {shouldShowCustomer ? (
         <View style={styles.customerBox}>
@@ -381,8 +431,8 @@ const TransactionCard = ({
       {!shouldShowCustomer && transaction.sales_order_id ? (
         <View style={styles.warningBox}>
           <Text style={styles.warningText}>
-            This transaction is linked to a sales order, but customer/payment details
-            were not returned by the backend for that order.
+            This transaction is linked to a sales order, but customer/payment
+            details were not returned by the backend for that order.
           </Text>
         </View>
       ) : null}
@@ -441,14 +491,12 @@ export default function ItemHistoryModal({
           );
         }
 
-        return (
-          orderItem.part_id === item.id ||
-          orderItem.part?.id === item.id
-        );
+        return orderItem.part_id === item.id || orderItem.part?.id === item.id;
       });
 
       const totalConfirmed = toNumber(paymentData?.summary?.total_confirmed);
       const totalPending = toNumber(paymentData?.summary?.total_pending);
+
       const totalSubmitted =
         toNumber(paymentData?.summary?.total_submitted) ||
         totalConfirmed + totalPending;
@@ -460,20 +508,13 @@ export default function ItemHistoryModal({
       const context: OrderContext = {
         orderId,
         orderNumber:
-          orderDetails?.order_number ||
-          paymentData?.order?.order_number ||
-          '',
-        orderStatus:
-          orderDetails?.status ||
-          paymentData?.order?.status ||
-          '',
+          orderDetails?.order_number || paymentData?.order?.order_number || '',
+        orderStatus: orderDetails?.status || paymentData?.order?.status || '',
         customerName:
           orderDetails?.customer?.full_name ||
           paymentData?.order?.customer_name ||
           '',
-        customerPhone:
-          orderDetails?.customer?.phone ||
-          '',
+        customerPhone: orderDetails?.customer?.phone || '',
         orderTotal,
         submittedAmount: totalSubmitted,
         confirmedAmount: totalConfirmed,
@@ -509,18 +550,12 @@ export default function ItemHistoryModal({
           ...transaction,
           sales_order_id: orderId || transaction.sales_order_id || null,
           order_number:
-            context?.orderNumber ||
-            transaction.sales_order?.order_number ||
-            '',
+            context?.orderNumber || transaction.sales_order?.order_number || '',
           order_status: context?.orderStatus || '',
           customer_name:
-            context?.customerName ||
-            transaction.customer?.full_name ||
-            '',
+            context?.customerName || transaction.customer?.full_name || '',
           customer_phone:
-            context?.customerPhone ||
-            transaction.customer?.phone ||
-            '',
+            context?.customerPhone || transaction.customer?.phone || '',
           order_total: context?.orderTotal,
           submitted_amount: context?.submittedAmount,
           confirmed_amount: context?.confirmedAmount,
@@ -551,22 +586,19 @@ export default function ItemHistoryModal({
     try {
       setLoading(true);
 
-      let response;
       let rawTransactions: Transaction[] = [];
 
       if (item.type === 'vehicle') {
-        response = await inventoryApi.getVehicleHistory(item.id);
-
+        const response = await inventoryApi.getVehicleHistory(item.id);
         const data = response?.data?.data;
-        setItemDetails(data?.vehicle || null);
 
+        setItemDetails(data?.vehicle || null);
         rawTransactions = data?.history || data?.transactions || [];
       } else {
-        response = await inventoryApi.getPartTransactions(item.id);
-
+        const response = await inventoryApi.getPartTransactions(item.id);
         const data = response?.data?.data;
-        setItemDetails(data?.part || null);
 
+        setItemDetails(data?.part || null);
         rawTransactions = data?.transactions || data?.history || [];
       }
 
@@ -618,7 +650,9 @@ export default function ItemHistoryModal({
     );
 
   const reservedCount = transactions
-    .filter((transaction) => isReservationTransaction(getTransactionType(transaction)))
+    .filter((transaction) =>
+      isReservationTransaction(getTransactionType(transaction))
+    )
     .reduce(
       (sum, transaction) => sum + Math.abs(toNumber(transaction.quantity_change)),
       0
@@ -662,9 +696,7 @@ export default function ItemHistoryModal({
                 </View>
 
                 <View style={styles.statCard}>
-                  <Text style={styles.statValue}>
-                    {reservedStock}
-                  </Text>
+                  <Text style={styles.statValue}>{reservedStock}</Text>
                   <Text style={styles.statLabel}>Reserved</Text>
                 </View>
 
@@ -680,6 +712,11 @@ export default function ItemHistoryModal({
                 <View style={styles.statCard}>
                   <Text style={styles.statValue}>{soldCount}</Text>
                   <Text style={styles.statLabel}>Total Sold</Text>
+                </View>
+
+                <View style={styles.statCard}>
+                  <Text style={styles.statValue}>{reservedCount}</Text>
+                  <Text style={styles.statLabel}>Total Reserved</Text>
                 </View>
 
                 <View style={styles.statCard}>
@@ -743,7 +780,9 @@ export default function ItemHistoryModal({
             <FlatList
               data={transactions}
               keyExtractor={(transaction, index) =>
-                transaction?.id ? `${transaction.id}-${index}` : index.toString()
+                transaction?.id
+                  ? `${transaction.id}-${index}`
+                  : index.toString()
               }
               renderItem={({ item: transaction }) => (
                 <TransactionCard transaction={transaction} itemType={item.type} />

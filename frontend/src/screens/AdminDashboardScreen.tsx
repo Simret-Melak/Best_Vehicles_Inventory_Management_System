@@ -14,8 +14,8 @@ import {
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { inventoryApi, salesApi } from '../services/api';
 import ItemHistoryModal from '../components/ItemHistoryModal';
+import { useAuth } from '../context/AuthContext';
 
-// Types based on your database schema
 interface Vehicle {
   id: string;
   model: string;
@@ -36,7 +36,6 @@ interface Part {
   part_number?: string;
 }
 
-// Combined inventory item for display
 interface DisplayItem {
   id: string;
   type: 'vehicle' | 'part';
@@ -51,7 +50,6 @@ interface DisplayItem {
   part_number?: string;
 }
 
-// Inventory Card Component
 const InventoryCard = ({
   item,
   onViewHistory,
@@ -101,9 +99,7 @@ const InventoryCard = ({
             {availableQuantity}
           </Text>
 
-          <Text style={styles.quantityUnit}>
-            {isVehicle ? 'available' : 'available'}
-          </Text>
+          <Text style={styles.quantityUnit}>available</Text>
         </View>
       </View>
 
@@ -136,6 +132,7 @@ const InventoryCard = ({
 
 export default function AdminDashboardScreen() {
   const navigation = useNavigation();
+  const { user, logout } = useAuth();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
@@ -166,9 +163,6 @@ export default function AdminDashboardScreen() {
     }
   };
 
-  // IMPORTANT:
-  // Admin pending approvals are orders with status "pending_admin".
-  // "pending" means partial payment and should stay with the worker.
   const loadPendingCount = async () => {
     try {
       const response = await salesApi.getSalesOrders({
@@ -215,6 +209,20 @@ export default function AdminDashboardScreen() {
     setRefreshing(true);
     await loadAllData();
     setRefreshing(false);
+  };
+
+  const handleLogout = () => {
+    Alert.alert('Logout', 'Are you sure you want to logout?', [
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+      {
+        text: 'Logout',
+        style: 'destructive',
+        onPress: logout,
+      },
+    ]);
   };
 
   const inventory: DisplayItem[] = [
@@ -316,11 +324,23 @@ export default function AdminDashboardScreen() {
       <StatusBar barStyle="light-content" />
 
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Inventory</Text>
+        <View style={styles.headerTopRow}>
+          <View style={styles.headerTextContainer}>
+            <Text style={styles.headerTitle}>Inventory</Text>
 
-        <Text style={styles.headerSubtitle}>
-          {inventory.length} items • {getLowStockCount()} low stock
-        </Text>
+            <Text style={styles.headerSubtitle}>
+              {inventory.length} items • {getLowStockCount()} low stock
+            </Text>
+
+            <Text style={styles.userText} numberOfLines={1}>
+              {user?.full_name || 'Admin'} • {user?.email}
+            </Text>
+          </View>
+
+          <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+            <Text style={styles.logoutButtonText}>Logout</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.actionBar}>
@@ -340,7 +360,14 @@ export default function AdminDashboardScreen() {
               ⚠️ {pendingCount} Pending Approvals
             </Text>
           </TouchableOpacity>
-        ) : null}
+        ) : (
+          <TouchableOpacity
+            style={styles.noPendingButton}
+            onPress={navigateToPendingRequests}
+          >
+            <Text style={styles.noPendingButtonText}>✓ No Pending</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <View style={styles.searchContainer}>
@@ -397,12 +424,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#0f172a',
   },
   header: {
-    paddingTop: 60,
+    paddingTop: 58,
     paddingHorizontal: 20,
-    paddingBottom: 16,
+    paddingBottom: 14,
+  },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  headerTextContainer: {
+    flex: 1,
   },
   headerTitle: {
-    fontSize: 34,
+    fontSize: 32,
     fontWeight: 'bold',
     color: '#ffffff',
     marginBottom: 4,
@@ -411,35 +447,72 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#94a3b8',
   },
+  userText: {
+    fontSize: 11,
+    color: '#64748b',
+    marginTop: 4,
+    maxWidth: 240,
+  },
+  logoutButton: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.35)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  logoutButtonText: {
+    color: '#ef4444',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   actionBar: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
     marginBottom: 16,
     gap: 10,
   },
   historyMainButton: {
-    backgroundColor: '#334155',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
-  },
-  historyMainButtonText: {
-    color: '#94a3b8',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  pendingButton: {
+    flex: 1,
     backgroundColor: '#334155',
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderRadius: 8,
+    alignItems: 'center',
+  },
+  historyMainButtonText: {
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  pendingButton: {
+    flex: 1,
+    backgroundColor: '#334155',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
   },
   pendingButtonText: {
     color: '#fbbf24',
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
+  },
+  noPendingButton: {
+    flex: 1,
+    backgroundColor: '#1e293b',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#334155',
+  },
+  noPendingButtonText: {
+    color: '#22c55e',
+    fontSize: 12,
+    fontWeight: '700',
   },
   searchContainer: {
     paddingHorizontal: 20,

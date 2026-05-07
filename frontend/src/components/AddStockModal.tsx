@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -13,11 +13,10 @@ import {
   Platform,
   TouchableWithoutFeedback,
   Keyboard,
-  FlatList,
 } from 'react-native';
 import { inventoryApi } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
-// Types
 interface Vehicle {
   id: string;
   model: string;
@@ -29,9 +28,12 @@ interface Vehicle {
 
 interface Part {
   id: string;
+  part_number?: string;
   name: string;
   specifications: string | null;
   quantity: number;
+  reserved_quantity?: number;
+  available_quantity?: number;
   unit_price: number;
   min_stock_alert: number;
 }
@@ -45,107 +47,188 @@ interface AddStockModalProps {
 }
 
 type InventoryType = 'vehicle' | 'part';
+type ModeType = 'existing' | 'new';
 
-export default function AddStockModal({ 
-  visible, 
-  onClose, 
+const toNumber = (value: any) => {
+  const numberValue = Number(value || 0);
+  return Number.isNaN(numberValue) ? 0 : numberValue;
+};
+
+const getUserId = (user: any) => {
+  return user?.id || user?.user_id || user?.uuid || null;
+};
+
+const getUserDisplayName = (user: any) => {
+  return user?.full_name || user?.name || user?.email || 'User';
+};
+
+export default function AddStockModal({
+  visible,
+  onClose,
   vehicles = [],
   parts = [],
-  onSuccess 
+  onSuccess,
 }: AddStockModalProps) {
+  const { user } = useAuth();
+
+  const userRole = user?.role;
+  const userId = getUserId(user);
+  const userDisplayName = getUserDisplayName(user);
+
+  // Based on your rule:
+  // admin = view only
+  // worker/store_manager = can add/create/update stock
+  // super_admin = mainly user management, not inventory manipulation here
+  const canManageInventory =
+    userRole === 'worker' || userRole === 'store_manager';
+
   const [inventoryType, setInventoryType] = useState<InventoryType>('part');
-  const [mode, setMode] = useState<'existing' | 'new'>('existing');
+  const [mode, setMode] = useState<ModeType>('existing');
+
   const [selectedVehicleId, setSelectedVehicleId] = useState('');
   const [selectedPartId, setSelectedPartId] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  
-  // New vehicle fields
+
   const [newVehicleModel, setNewVehicleModel] = useState('');
   const [newVehicleChassis, setNewVehicleChassis] = useState('');
   const [newVehicleSpecs, setNewVehicleSpecs] = useState('');
   const [newVehiclePrice, setNewVehiclePrice] = useState('');
-  
-  // New part fields
+
   const [newPartName, setNewPartName] = useState('');
   const [newPartSpecs, setNewPartSpecs] = useState('');
   const [newPartPrice, setNewPartPrice] = useState('');
   const [newPartMinStock, setNewPartMinStock] = useState('5');
-  
-  // Common fields
+
   const [quantity, setQuantity] = useState('');
+  const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(false);
 
   const resetForm = () => {
+    setInventoryType('part');
+    setMode('existing');
+
     setSelectedVehicleId('');
     setSelectedPartId('');
     setSearchQuery('');
+
     setNewVehicleModel('');
     setNewVehicleChassis('');
     setNewVehicleSpecs('');
     setNewVehiclePrice('');
+
     setNewPartName('');
     setNewPartSpecs('');
     setNewPartPrice('');
     setNewPartMinStock('5');
+
     setQuantity('');
-    setMode('existing');
+    setNotes('');
   };
 
-  // Filter items based on search query
-  const getFilteredItems = () => {
-    if (inventoryType === 'part') {
-      return parts.filter(part => 
-        part.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (part.specifications && part.specifications.toLowerCase().includes(searchQuery.toLowerCase()))
-      );
-    } else {
-      return vehicles.filter(vehicle => 
-        vehicle.model.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        vehicle.chassis_number.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (vehicle.specifications && vehicle.specifications.toLowerCase().includes(searchQuery.toLowerCase()))
-      );
+  useEffect(() => {
+    if (visible) {
+      resetForm();
     }
+  }, [visible]);
+
+  const handleClose = () => {
+    resetForm();
+    onClose();
   };
 
-  // Determine if quantity field should be shown
+  const filteredItems = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
+    if (inventoryType === 'part') {
+      return parts.filter((part) => {
+        return (
+          part.name?.toLowerCase().includes(query) ||
+          part.part_number?.toLowerCase().includes(query) ||
+          part.specifications?.toLowerCase().includes(query)
+        );
+      });
+    }
+
+    return vehicles.filter((vehicle) => {
+      return (
+        vehicle.model?.toLowerCase().includes(query) ||
+        vehicle.chassis_number?.toLowerCase().includes(query) ||
+        vehicle.specifications?.toLowerCase().includes(query)
+      );
+    });
+  }, [inventoryType, parts, vehicles, searchQuery]);
+
+  const selectedVehicle = vehicles.find(
+    (vehicle) => vehicle.id === selectedVehicleId
+  );
+
+  const selectedPart = parts.find((part) => part.id === selectedPartId);
+
   const shouldShowQuantity = () => {
-    // Parts always show quantity
     if (inventoryType === 'part') return true;
-    
-    // For vehicles: only show when adding to existing model
     if (inventoryType === 'vehicle' && mode === 'existing') return true;
-    
-    // New vehicles don't need quantity
     return false;
   };
 
-  const handleSubmit = async () => {
-    // Only validate quantity if the field is shown
-    if (shouldShowQuantity()) {
-      const qty = parseInt(quantity);
-      if (!qty || qty <= 0) {
-        Alert.alert('Error', 'Please enter a valid quantity');
-        return;
-      }
+  const validatePermission = () => {
+    if (!canManageInventory) {
+      Alert.alert(
+        'Permission Denied',
+        'Only workers and store managers can add or update stock. Admin can only view inventory.'
+      );
+      return false;
     }
+
+    if (!userId) {
+      Alert.alert(
+        'Login Required',
+        'Could not find the logged-in user ID. Please log out and log in again.'
+      );
+      return false;
+    }
+
+    return true;
+  };
+
+  const validateQuantity = () => {
+    if (!shouldShowQuantity()) return true;
+
+    const qty = parseInt(quantity, 10);
+
+    if (!qty || qty <= 0) {
+      Alert.alert('Error', 'Please enter a valid quantity');
+      return false;
+    }
+
+    return true;
+  };
+
+  const handleSubmit = async () => {
+    if (!validatePermission()) return;
+    if (!validateQuantity()) return;
 
     setLoading(true);
 
     try {
+      const performedBy = userId;
+      const performedByName = userDisplayName;
+      const cleanNotes = notes.trim() || undefined;
+
       if (inventoryType === 'vehicle') {
         if (mode === 'new') {
-          // Create new vehicle (single unit - no quantity needed)
           if (!newVehicleModel.trim()) {
             Alert.alert('Error', 'Please enter vehicle model');
             setLoading(false);
             return;
           }
+
           if (!newVehicleChassis.trim()) {
             Alert.alert('Error', 'Please enter chassis number');
             setLoading(false);
             return;
           }
-          if (!newVehiclePrice) {
+
+          if (!newVehiclePrice.trim()) {
             Alert.alert('Error', 'Please enter unit price');
             setLoading(false);
             return;
@@ -154,62 +237,75 @@ export default function AddStockModal({
           const vehicleData = {
             model: newVehicleModel.trim(),
             chassis_number: newVehicleChassis.trim(),
-            specifications: newVehicleSpecs || null,
-            unit_price: parseFloat(newVehiclePrice),
+            specifications: newVehicleSpecs.trim() || null,
+            unit_price: toNumber(newVehiclePrice),
+            performed_by: performedBy,
+            performed_by_name: performedByName,
           };
 
           const response = await inventoryApi.createVehicle(vehicleData);
-          
-          Alert.alert('Success', `Vehicle ${response.data.data.model} added to inventory!`);
-          
+
+          Alert.alert(
+            'Success',
+            `Vehicle ${response.data.data.model} added to inventory.`
+          );
         } else {
-          // Add stock to existing vehicle (add multiple new units)
           if (!selectedVehicleId) {
             Alert.alert('Error', 'Please select a vehicle model');
             setLoading(false);
             return;
           }
 
-          const selectedVehicle = vehicles.find(v => v.id === selectedVehicleId);
           if (!selectedVehicle) {
             Alert.alert('Error', 'Selected vehicle not found');
             setLoading(false);
             return;
           }
 
-          const qty = parseInt(quantity);
-          
-          // Create multiple units based on quantity
+          const qty = parseInt(quantity, 10);
           let successCount = 0;
+
           for (let i = 0; i < qty; i++) {
             const timestamp = Date.now() + i;
-            const newChassisNumber = `${selectedVehicle.chassis_number.slice(0, -6)}${timestamp.toString().slice(-6)}`;
-            
+
+            const baseChassis =
+              selectedVehicle.chassis_number.length > 6
+                ? selectedVehicle.chassis_number.slice(0, -6)
+                : selectedVehicle.chassis_number;
+
+            const newChassisNumber = `${baseChassis}${timestamp
+              .toString()
+              .slice(-6)}`;
+
             const vehicleData = {
               model: selectedVehicle.model,
               chassis_number: newChassisNumber,
               specifications: selectedVehicle.specifications,
               unit_price: selectedVehicle.unit_price,
+              performed_by: performedBy,
+              performed_by_name: performedByName,
             };
 
             await inventoryApi.createVehicle(vehicleData);
-            successCount++;
+            successCount += 1;
           }
-          
-          Alert.alert('Success', `Added ${successCount} new unit(s) of ${selectedVehicle.model}!`);
+
+          Alert.alert(
+            'Success',
+            `Added ${successCount} new unit(s) of ${selectedVehicle.model}.`
+          );
         }
       } else {
-        // Parts logic
-        const qty = parseInt(quantity);
-        
+        const qty = parseInt(quantity, 10);
+
         if (mode === 'new') {
-          // Create new part
           if (!newPartName.trim()) {
             Alert.alert('Error', 'Please enter part name');
             setLoading(false);
             return;
           }
-          if (!newPartPrice) {
+
+          if (!newPartPrice.trim()) {
             Alert.alert('Error', 'Please enter unit price');
             setLoading(false);
             return;
@@ -217,27 +313,39 @@ export default function AddStockModal({
 
           const partData = {
             name: newPartName.trim(),
-            specifications: newPartSpecs || null,
+            specifications: newPartSpecs.trim() || null,
             quantity: qty,
-            unit_price: parseFloat(newPartPrice),
-            min_stock_alert: parseInt(newPartMinStock) || 5,
+            unit_price: toNumber(newPartPrice),
+            min_stock_alert: parseInt(newPartMinStock, 10) || 5,
+            performed_by: performedBy,
+            performed_by_name: performedByName,
           };
 
           const response = await inventoryApi.createPart(partData);
-          
-          Alert.alert('Success', `Part ${response.data.data.name} added with ${qty} units!`);
-          
+
+          Alert.alert(
+            'Success',
+            `Part ${response.data.data.name} added with ${qty} units.`
+          );
         } else {
-          // Add stock to existing part
           if (!selectedPartId) {
             Alert.alert('Error', 'Please select a part');
             setLoading(false);
             return;
           }
 
-          const response = await inventoryApi.addPartStock(selectedPartId, qty);
-          
-          Alert.alert('Success', `Added ${qty} units to ${response.data.data.name}!`);
+          const response = await inventoryApi.addPartStock(
+            selectedPartId,
+            qty,
+            cleanNotes,
+            performedBy,
+            performedByName
+          );
+
+          Alert.alert(
+            'Success',
+            `Added ${qty} units to ${response.data.data.name}.`
+          );
         }
       }
 
@@ -245,32 +353,46 @@ export default function AddStockModal({
       resetForm();
       onSuccess();
       onClose();
-      
     } catch (error: any) {
-      console.error('Error adding stock:', error);
-      Alert.alert('Error', error.response?.data?.error || 'Failed to add stock. Please try again.');
+      console.error('Error adding stock:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        requestData: error.config?.data,
+        url: error.config?.url,
+        message: error.message,
+      });
+
+      Alert.alert(
+        'Error',
+        error.response?.data?.error || 'Failed to add stock. Please try again.'
+      );
+
       setLoading(false);
     }
   };
 
-  const selectedVehicle = vehicles?.find(v => v.id === selectedVehicleId);
-  const selectedPart = parts?.find(p => p.id === selectedPartId);
-  
-  const existingItems = getFilteredItems();
-  const hasItems = existingItems && existingItems.length > 0;
-
-  const renderItem = ({ item }: { item: any }) => {
+  const renderSelectableItem = (item: any) => {
     const isPart = inventoryType === 'part';
-    const isSelected = isPart 
-      ? selectedPartId === item.id 
+
+    const isSelected = isPart
+      ? selectedPartId === item.id
       : selectedVehicleId === item.id;
-    
+
+    const itemName = isPart ? item.name : item.model;
+
+    const itemSubText = isPart
+      ? `Stock: ${toNumber(item.quantity)} units • Available: ${
+          item.available_quantity ??
+          toNumber(item.quantity) - toNumber(item.reserved_quantity)
+        } • Price: ETB ${toNumber(item.unit_price).toLocaleString()}`
+      : `Chassis: ${item.chassis_number} • Price: ETB ${toNumber(
+          item.unit_price
+        ).toLocaleString()}`;
+
     return (
       <TouchableOpacity
-        style={[
-          styles.itemOption,
-          isSelected && styles.itemOptionSelected,
-        ]}
+        key={item.id}
+        style={[styles.itemOption, isSelected && styles.itemOptionSelected]}
         onPress={() => {
           if (isPart) {
             setSelectedPartId(item.id);
@@ -279,26 +401,25 @@ export default function AddStockModal({
           }
         }}
       >
-        <Text style={styles.itemOptionIcon}>
-          {inventoryType === 'part' ? '🔧' : '🚛'}
-        </Text>
+        <Text style={styles.itemOptionIcon}>{isPart ? '🔧' : '🚛'}</Text>
+
         <View style={styles.itemOptionDetails}>
-          <Text style={[
-            styles.itemOptionName,
-            isSelected && styles.itemOptionNameSelected,
-          ]}>
-            {isPart ? (item as Part).name : (item as Vehicle).model}
+          <Text
+            style={[
+              styles.itemOptionName,
+              isSelected && styles.itemOptionNameSelected,
+            ]}
+          >
+            {itemName}
           </Text>
-          {isPart ? (
-            <Text style={styles.itemOptionStock}>
-              Stock: {(item as Part).quantity} units • Price: ETB {(item as Part).unit_price.toLocaleString()}
-            </Text>
-          ) : (
-            <Text style={styles.itemOptionStock}>
-              Chassis: {(item as Vehicle).chassis_number} • Price: ETB {(item as Vehicle).unit_price.toLocaleString()}
-            </Text>
-          )}
+
+          {isPart && item.part_number ? (
+            <Text style={styles.itemOptionCode}>{item.part_number}</Text>
+          ) : null}
+
+          <Text style={styles.itemOptionStock}>{itemSubText}</Text>
         </View>
+
         {isSelected && <Text style={styles.checkMark}>✓</Text>}
       </TouchableOpacity>
     );
@@ -308,30 +429,39 @@ export default function AddStockModal({
     <Modal
       visible={visible}
       animationType="slide"
-      transparent={true}
-      onRequestClose={onClose}
+      transparent
+      onRequestClose={handleClose}
     >
-      <KeyboardAvoidingView 
+      <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.modalOverlay}
       >
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
           <View style={styles.modalContent}>
-            {/* Header */}
             <View style={styles.modalHeader}>
               <Text style={styles.modalHeaderIcon}>➕</Text>
               <Text style={styles.modalTitle}>Add Stock</Text>
-              <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+
+              <TouchableOpacity onPress={handleClose} style={styles.closeButton}>
                 <Text style={styles.closeButtonText}>✕</Text>
               </TouchableOpacity>
             </View>
 
-            <ScrollView 
+            <ScrollView
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={styles.scrollContent}
             >
-              {/* Inventory Type Toggle */}
+              {!canManageInventory ? (
+                <View style={styles.warningBox}>
+                  <Text style={styles.warningText}>
+                    Admin and super admin accounts cannot add or update stock from
+                    this screen. Inventory stock changes are allowed for workers
+                    and store managers.
+                  </Text>
+                </View>
+              ) : null}
+
               <View style={styles.typeToggle}>
                 <TouchableOpacity
                   style={[
@@ -340,13 +470,22 @@ export default function AddStockModal({
                   ]}
                   onPress={() => {
                     setInventoryType('part');
-                    resetForm();
+                    setMode('existing');
+                    setSelectedVehicleId('');
+                    setSearchQuery('');
+                    setQuantity('');
                   }}
                 >
-                  <Text style={[styles.typeButtonText, inventoryType === 'part' && styles.typeButtonTextActive]}>
+                  <Text
+                    style={[
+                      styles.typeButtonText,
+                      inventoryType === 'part' && styles.typeButtonTextActive,
+                    ]}
+                  >
                     🔧 Part
                   </Text>
                 </TouchableOpacity>
+
                 <TouchableOpacity
                   style={[
                     styles.typeButton,
@@ -354,16 +493,23 @@ export default function AddStockModal({
                   ]}
                   onPress={() => {
                     setInventoryType('vehicle');
-                    resetForm();
+                    setMode('new');
+                    setSelectedPartId('');
+                    setSearchQuery('');
+                    setQuantity('');
                   }}
                 >
-                  <Text style={[styles.typeButtonText, inventoryType === 'vehicle' && styles.typeButtonTextActive]}>
+                  <Text
+                    style={[
+                      styles.typeButtonText,
+                      inventoryType === 'vehicle' && styles.typeButtonTextActive,
+                    ]}
+                  >
                     🚛 Vehicle
                   </Text>
                 </TouchableOpacity>
               </View>
 
-              {/* Mode Toggle */}
               <View style={styles.modeToggle}>
                 <TouchableOpacity
                   style={[
@@ -372,13 +518,16 @@ export default function AddStockModal({
                   ]}
                   onPress={() => setMode('existing')}
                 >
-                  <Text style={[
-                    styles.modeButtonText,
-                    mode === 'existing' && styles.modeButtonTextActive,
-                  ]}>
+                  <Text
+                    style={[
+                      styles.modeButtonText,
+                      mode === 'existing' && styles.modeButtonTextActive,
+                    ]}
+                  >
                     Existing {inventoryType === 'part' ? 'Part' : 'Model'}
                   </Text>
                 </TouchableOpacity>
+
                 <TouchableOpacity
                   style={[
                     styles.modeButton,
@@ -386,10 +535,12 @@ export default function AddStockModal({
                   ]}
                   onPress={() => setMode('new')}
                 >
-                  <Text style={[
-                    styles.modeButtonText,
-                    mode === 'new' && styles.modeButtonTextActive,
-                  ]}>
+                  <Text
+                    style={[
+                      styles.modeButtonText,
+                      mode === 'new' && styles.modeButtonTextActive,
+                    ]}
+                  >
                     New {inventoryType === 'part' ? 'Part' : 'Vehicle'}
                   </Text>
                 </TouchableOpacity>
@@ -400,168 +551,164 @@ export default function AddStockModal({
                   <Text style={styles.label}>
                     Select {inventoryType === 'part' ? 'Part' : 'Vehicle'}
                   </Text>
-                  
-                  {/* Search Bar */}
+
                   <View style={styles.searchContainer}>
                     <Text style={styles.searchIcon}>🔍</Text>
+
                     <TextInput
                       style={styles.searchInput}
                       value={searchQuery}
                       onChangeText={setSearchQuery}
-                      placeholder={`Search by name, chassis, or specs...`}
+                      placeholder={
+                        inventoryType === 'part'
+                          ? 'Search by name, part number, or specs...'
+                          : 'Search by model, chassis, or specs...'
+                      }
                       placeholderTextColor="#64748b"
                     />
+
                     {searchQuery !== '' && (
                       <TouchableOpacity onPress={() => setSearchQuery('')}>
                         <Text style={styles.clearIcon}>✕</Text>
                       </TouchableOpacity>
                     )}
                   </View>
-                  
-                  {/* Items List - Scrollable */}
+
                   <View style={styles.itemListContainer}>
-                    {!hasItems ? (
+                    {filteredItems.length === 0 ? (
                       <Text style={styles.emptyText}>
-                        No {inventoryType === 'part' ? 'parts' : 'vehicles'} available. Add a new one first.
+                        No {inventoryType === 'part' ? 'parts' : 'vehicles'} found.
                       </Text>
                     ) : (
-                      <FlatList
-                        data={existingItems}
-                        keyExtractor={(item) => item.id}
-                        renderItem={renderItem}
-                        showsVerticalScrollIndicator={true}
-                        style={styles.flatList}
-                      />
+                      filteredItems.map(renderSelectableItem)
                     )}
                   </View>
                 </View>
-              ) : (
-                inventoryType === 'part' ? (
-                  // New Part Form
-                  <>
-                    <View style={styles.formGroup}>
-                      <Text style={styles.label}>Part Name *</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={newPartName}
-                        onChangeText={setNewPartName}
-                        placeholder="e.g., Heavy Duty Battery"
-                        placeholderTextColor="#64748b"
-                      />
-                    </View>
+              ) : inventoryType === 'part' ? (
+                <>
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Part Name *</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={newPartName}
+                      onChangeText={setNewPartName}
+                      placeholder="e.g., Heavy Duty Battery"
+                      placeholderTextColor="#64748b"
+                    />
+                  </View>
 
-                    <View style={styles.formGroup}>
-                      <Text style={styles.label}>Specifications</Text>
-                      <TextInput
-                        style={[styles.input, styles.textArea]}
-                        value={newPartSpecs}
-                        onChangeText={setNewPartSpecs}
-                        placeholder="12V, 200Ah, Lithium..."
-                        placeholderTextColor="#64748b"
-                        multiline
-                        numberOfLines={3}
-                        textAlignVertical="top"
-                      />
-                    </View>
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Specifications</Text>
+                    <TextInput
+                      style={[styles.input, styles.textArea]}
+                      value={newPartSpecs}
+                      onChangeText={setNewPartSpecs}
+                      placeholder="12V, 200Ah, Lithium..."
+                      placeholderTextColor="#64748b"
+                      multiline
+                      numberOfLines={3}
+                      textAlignVertical="top"
+                    />
+                  </View>
 
-                    <View style={styles.row}>
-                      <View style={[styles.formGroup, styles.flex1]}>
-                        <Text style={styles.label}>Unit Price *</Text>
-                        <TextInput
-                          style={styles.input}
-                          value={newPartPrice}
-                          onChangeText={setNewPartPrice}
-                          placeholder="Price"
-                          placeholderTextColor="#64748b"
-                          keyboardType="numeric"
-                        />
-                      </View>
-                      <View style={[styles.formGroup, styles.flex1]}>
-                        <Text style={styles.label}>Min Stock Alert</Text>
-                        <TextInput
-                          style={styles.input}
-                          value={newPartMinStock}
-                          onChangeText={setNewPartMinStock}
-                          placeholder="5"
-                          placeholderTextColor="#64748b"
-                          keyboardType="numeric"
-                        />
-                      </View>
-                    </View>
-                  </>
-                ) : (
-                  // New Vehicle Form
-                  <>
-                    <View style={styles.formGroup}>
-                      <Text style={styles.label}>Vehicle Model *</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={newVehicleModel}
-                        onChangeText={setNewVehicleModel}
-                        placeholder="e.g., Electric Bajaj"
-                        placeholderTextColor="#64748b"
-                      />
-                    </View>
-
-                    <View style={styles.formGroup}>
-                      <Text style={styles.label}>Chassis Number *</Text>
-                      <TextInput
-                        style={styles.input}
-                        value={newVehicleChassis}
-                        onChangeText={setNewVehicleChassis}
-                        placeholder="Unique chassis number"
-                        placeholderTextColor="#64748b"
-                        autoCapitalize="characters"
-                      />
-                    </View>
-
-                    <View style={styles.formGroup}>
-                      <Text style={styles.label}>Specifications</Text>
-                      <TextInput
-                        style={[styles.input, styles.textArea]}
-                        value={newVehicleSpecs}
-                        onChangeText={setNewVehicleSpecs}
-                        placeholder="Without battery, Red color..."
-                        placeholderTextColor="#64748b"
-                        multiline
-                        numberOfLines={3}
-                        textAlignVertical="top"
-                      />
-                    </View>
-
-                    <View style={styles.formGroup}>
+                  <View style={styles.row}>
+                    <View style={[styles.formGroup, styles.flex1]}>
                       <Text style={styles.label}>Unit Price *</Text>
                       <TextInput
                         style={styles.input}
-                        value={newVehiclePrice}
-                        onChangeText={setNewVehiclePrice}
+                        value={newPartPrice}
+                        onChangeText={setNewPartPrice}
                         placeholder="Price"
                         placeholderTextColor="#64748b"
                         keyboardType="numeric"
                       />
                     </View>
-                    
-                    {/* Note for new vehicle */}
-                    <View style={styles.noteContainer}>
-                      <Text style={styles.noteText}>
-                        ℹ️ One vehicle unit will be added with the chassis number above.
-                      </Text>
+
+                    <View style={[styles.formGroup, styles.flex1]}>
+                      <Text style={styles.label}>Min Stock Alert</Text>
+                      <TextInput
+                        style={styles.input}
+                        value={newPartMinStock}
+                        onChangeText={setNewPartMinStock}
+                        placeholder="5"
+                        placeholderTextColor="#64748b"
+                        keyboardType="numeric"
+                      />
                     </View>
-                  </>
-                )
+                  </View>
+                </>
+              ) : (
+                <>
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Vehicle Model *</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={newVehicleModel}
+                      onChangeText={setNewVehicleModel}
+                      placeholder="e.g., Electric Bajaj"
+                      placeholderTextColor="#64748b"
+                    />
+                  </View>
+
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Chassis Number *</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={newVehicleChassis}
+                      onChangeText={setNewVehicleChassis}
+                      placeholder="Unique chassis number"
+                      placeholderTextColor="#64748b"
+                      autoCapitalize="characters"
+                    />
+                  </View>
+
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Specifications</Text>
+                    <TextInput
+                      style={[styles.input, styles.textArea]}
+                      value={newVehicleSpecs}
+                      onChangeText={setNewVehicleSpecs}
+                      placeholder="Without battery, red color..."
+                      placeholderTextColor="#64748b"
+                      multiline
+                      numberOfLines={3}
+                      textAlignVertical="top"
+                    />
+                  </View>
+
+                  <View style={styles.formGroup}>
+                    <Text style={styles.label}>Unit Price *</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={newVehiclePrice}
+                      onChangeText={setNewVehiclePrice}
+                      placeholder="Price"
+                      placeholderTextColor="#64748b"
+                      keyboardType="numeric"
+                    />
+                  </View>
+
+                  <View style={styles.noteContainer}>
+                    <Text style={styles.noteText}>
+                      ℹ️ One vehicle unit will be added with the chassis number above.
+                    </Text>
+                  </View>
+                </>
               )}
 
-              {/* Quantity Input - Only shown when needed */}
               {shouldShowQuantity() && (
                 <View style={styles.formGroup}>
                   <Text style={styles.label}>
                     Quantity to Add *
-                    {inventoryType === 'vehicle' && mode === 'existing' && ' (Number of new units)'}
+                    {inventoryType === 'vehicle' &&
+                      mode === 'existing' &&
+                      ' (Number of new units)'}
                   </Text>
+
                   <TextInput
                     style={styles.input}
                     value={quantity}
-                    onChangeText={setQuantity}
+                    onChangeText={(text) => setQuantity(text.replace(/[^0-9]/g, ''))}
                     placeholder="Enter quantity"
                     placeholderTextColor="#64748b"
                     keyboardType="numeric"
@@ -569,50 +716,69 @@ export default function AddStockModal({
                 </View>
               )}
 
-              {/* Preview Section */}
-              {mode === 'existing' && (
+              {inventoryType === 'part' && mode === 'existing' ? (
+                <View style={styles.formGroup}>
+                  <Text style={styles.label}>Notes</Text>
+                  <TextInput
+                    style={[styles.input, styles.textArea]}
+                    value={notes}
+                    onChangeText={setNotes}
+                    placeholder="Optional note for stock history"
+                    placeholderTextColor="#64748b"
+                    multiline
+                    numberOfLines={3}
+                    textAlignVertical="top"
+                  />
+                </View>
+              ) : null}
+
+              {mode === 'existing' ? (
                 <View style={styles.previewContainer}>
                   <Text style={styles.previewTitle}>📋 Summary</Text>
-                  {inventoryType === 'part' && selectedPart && quantity && (
+
+                  {inventoryType === 'part' && selectedPart && quantity ? (
                     <Text style={styles.previewText}>
-                      {selectedPart.name}: {selectedPart.quantity} → {selectedPart.quantity + (parseInt(quantity) || 0)} units
+                      {selectedPart.name}: {selectedPart.quantity} →{' '}
+                      {selectedPart.quantity + (parseInt(quantity, 10) || 0)} units
                     </Text>
-                  )}
-                  {inventoryType === 'vehicle' && selectedVehicle && quantity && (
+                  ) : null}
+
+                  {inventoryType === 'vehicle' && selectedVehicle && quantity ? (
                     <Text style={styles.previewText}>
                       Adding {quantity} new unit(s) of {selectedVehicle.model}
                     </Text>
-                  )}
+                  ) : null}
                 </View>
-              )}
-              {mode === 'new' && (
+              ) : (
                 <View style={styles.previewContainer}>
                   <Text style={styles.previewTitle}>📋 Summary</Text>
-                  {inventoryType === 'vehicle' && newVehicleModel && (
+
+                  {inventoryType === 'vehicle' && newVehicleModel ? (
                     <Text style={styles.previewText}>
                       Adding new vehicle: {newVehicleModel}
                     </Text>
-                  )}
-                  {inventoryType === 'part' && newPartName && quantity && (
+                  ) : null}
+
+                  {inventoryType === 'part' && newPartName && quantity ? (
                     <Text style={styles.previewText}>
                       Creating new part: {newPartName} with {quantity} units
                     </Text>
-                  )}
+                  ) : null}
                 </View>
               )}
 
-              {/* Action Buttons */}
               <View style={styles.actionButtons}>
-                <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
+                <TouchableOpacity style={styles.cancelButton} onPress={handleClose}>
                   <Text style={styles.cancelButtonText}>Cancel</Text>
                 </TouchableOpacity>
+
                 <TouchableOpacity
                   style={[
                     styles.submitButton,
-                    loading && styles.submitButtonDisabled,
+                    (loading || !canManageInventory) && styles.submitButtonDisabled,
                   ]}
                   onPress={handleSubmit}
-                  disabled={loading}
+                  disabled={loading || !canManageInventory}
                 >
                   {loading ? (
                     <ActivityIndicator size="small" color="#ffffff" />
@@ -680,6 +846,19 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  warningBox: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.35)',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  warningText: {
+    color: '#fca5a5',
+    fontSize: 13,
+    lineHeight: 18,
   },
   typeToggle: {
     flexDirection: 'row',
@@ -784,15 +963,11 @@ const styles = StyleSheet.create({
     padding: 4,
   },
   itemListContainer: {
-    maxHeight: 300,
     backgroundColor: '#0f172a',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#334155',
     overflow: 'hidden',
-  },
-  flatList: {
-    maxHeight: 300,
   },
   itemOption: {
     flexDirection: 'row',
@@ -819,6 +994,11 @@ const styles = StyleSheet.create({
   },
   itemOptionNameSelected: {
     color: '#ef4444',
+  },
+  itemOptionCode: {
+    fontSize: 11,
+    color: '#94a3b8',
+    marginBottom: 2,
   },
   itemOptionStock: {
     fontSize: 11,

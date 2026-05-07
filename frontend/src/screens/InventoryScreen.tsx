@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
   Modal,
 } from 'react-native';
+import ItemHistoryModal from '../components/ItemHistoryModal';
 
 // Types
 interface InventoryItem {
@@ -20,27 +21,49 @@ interface InventoryItem {
   quantity: number;
   unit_price: number;
   status?: string;
+
+  // Needed for item-specific history modal
+  item_type?: 'vehicle' | 'part';
+  part_number?: string;
+  chassis_number?: string;
+}
+
+// Item shape expected by ItemHistoryModal
+interface HistoryModalItem {
+  id: string;
+  name: string;
+  type: 'vehicle' | 'part';
+  sku?: string;
+  current_quantity: number;
+  unit_price: number;
 }
 
 // Sample data (replace with API call)
 const sampleItems: InventoryItem[] = [
   {
     id: '1',
+    item_type: 'part',
     name: 'Beast Axle 3000',
+    part_number: 'PRT-0001',
     specifications: 'Heavy-duty rear axle, 4×4 compatible, forged steel...',
     quantity: 12,
     unit_price: 25000,
   },
   {
     id: '2',
+    item_type: 'part',
     name: 'Monster Suspension Kit',
-    specifications: 'Full lift kit, 3-inch lift, heavy-duty shocks, polyurethane bushings',
+    part_number: 'PRT-0002',
+    specifications:
+      'Full lift kit, 3-inch lift, heavy-duty shocks, polyurethane bushings',
     quantity: 38,
     unit_price: 35000,
   },
   {
     id: '3',
+    item_type: 'part',
     name: 'Beast Off-Road Tires',
+    part_number: 'PRT-0003',
     specifications: '33" mud terrain tires, set of 4, reinforced sidewalls',
     quantity: 8,
     unit_price: 45000,
@@ -48,43 +71,57 @@ const sampleItems: InventoryItem[] = [
 ];
 
 // Inventory Card Component
-const InventoryCard = ({ 
-  item, 
-  onAddStock, 
-  onRequestSale, 
-  onViewHistory 
-}: { 
-  item: InventoryItem; 
-  onAddStock: () => void; 
-  onRequestSale: (item: InventoryItem) => void; 
+const InventoryCard = ({
+  item,
+  onAddStock,
+  onRequestSale,
+  onViewHistory,
+}: {
+  item: InventoryItem;
+  onAddStock: () => void;
+  onRequestSale: (item: InventoryItem) => void;
   onViewHistory: (item: InventoryItem) => void;
 }) => {
   const isLowStock = item.quantity < 5;
-  
+
   return (
     <View style={styles.card}>
       <View style={styles.cardHeader}>
         <Text style={styles.itemName}>{item.name}</Text>
+
         <View style={styles.quantityContainer}>
-          <Text style={[styles.quantityNumber, isLowStock && styles.lowStockQuantity]}>
+          <Text
+            style={[
+              styles.quantityNumber,
+              isLowStock && styles.lowStockQuantity,
+            ]}
+          >
             {item.quantity}
           </Text>
           <Text style={styles.quantityUnit}>in stock</Text>
         </View>
       </View>
-      
+
       <Text style={styles.itemDescription} numberOfLines={2}>
         {item.specifications}
       </Text>
-      
+
       <View style={styles.cardActions}>
         <TouchableOpacity style={styles.addStockButton} onPress={onAddStock}>
           <Text style={styles.addStockButtonText}>+ Add Stock</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.saleButton} onPress={() => onRequestSale(item)}>
+
+        <TouchableOpacity
+          style={styles.saleButton}
+          onPress={() => onRequestSale(item)}
+        >
           <Text style={styles.saleButtonText}>Request Sale</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.historyButton} onPress={() => onViewHistory(item)}>
+
+        <TouchableOpacity
+          style={styles.historyButton}
+          onPress={() => onViewHistory(item)}
+        >
           <Text style={styles.historyButtonText}>📂 History</Text>
         </TouchableOpacity>
       </View>
@@ -93,15 +130,15 @@ const InventoryCard = ({
 };
 
 // Add Stock Modal Component
-const AddStockModal = ({ 
-  visible, 
-  onClose, 
-  items, 
-  onSuccess 
-}: { 
-  visible: boolean; 
-  onClose: () => void; 
-  items: InventoryItem[]; 
+const AddStockModal = ({
+  visible,
+  onClose,
+  items,
+  onSuccess,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  items: InventoryItem[];
   onSuccess: () => void;
 }) => {
   const [selectedItemId, setSelectedItemId] = useState('');
@@ -111,8 +148,10 @@ const AddStockModal = ({
   const handleSubmit = () => {
     // API call would go here
     console.log('Add stock:', { itemId: selectedItemId, quantity, notes });
+
     onSuccess();
     onClose();
+
     setSelectedItemId('');
     setQuantity('');
     setNotes('');
@@ -123,8 +162,9 @@ const AddStockModal = ({
       <View style={styles.modalOverlay}>
         <View style={styles.modalContent}>
           <Text style={styles.modalTitle}>Add Stock</Text>
-          
+
           <Text style={styles.modalLabel}>Select Item</Text>
+
           <View style={styles.modalPicker}>
             {items.map((item) => (
               <TouchableOpacity
@@ -135,17 +175,21 @@ const AddStockModal = ({
                 ]}
                 onPress={() => setSelectedItemId(item.id)}
               >
-                <Text style={[
-                  styles.pickerOptionText,
-                  selectedItemId === item.id && styles.pickerOptionTextSelected,
-                ]}>
+                <Text
+                  style={[
+                    styles.pickerOptionText,
+                    selectedItemId === item.id &&
+                      styles.pickerOptionTextSelected,
+                  ]}
+                >
                   {item.name}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
-          
+
           <Text style={styles.modalLabel}>Quantity</Text>
+
           <TextInput
             style={styles.modalInput}
             value={quantity}
@@ -154,8 +198,9 @@ const AddStockModal = ({
             placeholder="Enter quantity"
             placeholderTextColor="#64748b"
           />
-          
+
           <Text style={styles.modalLabel}>Notes (optional)</Text>
+
           <TextInput
             style={[styles.modalInput, styles.modalTextArea]}
             value={notes}
@@ -165,12 +210,19 @@ const AddStockModal = ({
             multiline
             numberOfLines={3}
           />
-          
+
           <View style={styles.modalButtons}>
-            <TouchableOpacity style={styles.modalCancelButton} onPress={onClose}>
+            <TouchableOpacity
+              style={styles.modalCancelButton}
+              onPress={onClose}
+            >
               <Text style={styles.modalCancelButtonText}>Cancel</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.modalSubmitButton} onPress={handleSubmit}>
+
+            <TouchableOpacity
+              style={styles.modalSubmitButton}
+              onPress={handleSubmit}
+            >
               <Text style={styles.modalSubmitButtonText}>Add Stock</Text>
             </TouchableOpacity>
           </View>
@@ -181,15 +233,15 @@ const AddStockModal = ({
 };
 
 // Request Sale Modal Component
-const RequestSaleModal = ({ 
-  visible, 
-  onClose, 
-  item, 
-  onSuccess 
-}: { 
-  visible: boolean; 
-  onClose: () => void; 
-  item: InventoryItem | null; 
+const RequestSaleModal = ({
+  visible,
+  onClose,
+  item,
+  onSuccess,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  item: InventoryItem | null;
   onSuccess: () => void;
 }) => {
   const [quantity, setQuantity] = useState('');
@@ -197,8 +249,10 @@ const RequestSaleModal = ({
 
   const handleSubmit = () => {
     console.log('Request sale:', { item, quantity, customerName });
+
     onSuccess();
     onClose();
+
     setQuantity('');
     setCustomerName('');
   };
@@ -208,15 +262,16 @@ const RequestSaleModal = ({
       <View style={styles.modalOverlay}>
         <View style={styles.modalContent}>
           <Text style={styles.modalTitle}>Request Sale</Text>
-          
+
           {item && (
             <View style={styles.modalInfoRow}>
               <Text style={styles.modalInfoLabel}>Item:</Text>
               <Text style={styles.modalInfoValue}>{item.name}</Text>
             </View>
           )}
-          
+
           <Text style={styles.modalLabel}>Customer Name</Text>
+
           <TextInput
             style={styles.modalInput}
             value={customerName}
@@ -224,8 +279,9 @@ const RequestSaleModal = ({
             placeholder="Enter customer name"
             placeholderTextColor="#64748b"
           />
-          
+
           <Text style={styles.modalLabel}>Quantity</Text>
+
           <TextInput
             style={styles.modalInput}
             value={quantity}
@@ -234,86 +290,22 @@ const RequestSaleModal = ({
             placeholder="Enter quantity"
             placeholderTextColor="#64748b"
           />
-          
+
           <View style={styles.modalButtons}>
-            <TouchableOpacity style={styles.modalCancelButton} onPress={onClose}>
+            <TouchableOpacity
+              style={styles.modalCancelButton}
+              onPress={onClose}
+            >
               <Text style={styles.modalCancelButtonText}>Cancel</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.modalSubmitButton} onPress={handleSubmit}>
+
+            <TouchableOpacity
+              style={styles.modalSubmitButton}
+              onPress={handleSubmit}
+            >
               <Text style={styles.modalSubmitButtonText}>Submit Request</Text>
             </TouchableOpacity>
           </View>
-        </View>
-      </View>
-    </Modal>
-  );
-};
-
-// Item History Modal Component
-const ItemHistoryModal = ({ 
-  visible, 
-  onClose, 
-  item 
-}: { 
-  visible: boolean; 
-  onClose: () => void; 
-  item: InventoryItem | null;
-}) => {
-  // Mock history data
-  const mockHistory = [
-    { id: '1', type: 'stock_in', quantity: 20, date: '2024-03-15', user: 'Admin', notes: 'Initial stock' },
-    { id: '2', type: 'sold', quantity: -5, date: '2024-03-20', user: 'Worker', notes: 'Sold to customer' },
-    { id: '3', type: 'stock_in', quantity: 10, date: '2024-04-01', user: 'Worker', notes: 'New shipment' },
-  ];
-
-  return (
-    <Modal visible={visible} animationType="slide" transparent={true}>
-      <View style={styles.modalOverlay}>
-        <View style={[styles.modalContent, styles.modalLarge]}>
-          <Text style={styles.modalTitle}>Item History</Text>
-          
-          {item && (
-            <View style={styles.historyHeader}>
-              <Text style={styles.historyItemName}>{item.name}</Text>
-              <Text style={styles.historyCurrentStock}>Current: {item.quantity} in stock</Text>
-            </View>
-          )}
-          
-          <FlatList
-            data={mockHistory}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item: historyItem }) => (
-              <View style={styles.historyRow}>
-                <View style={styles.historyIconContainer}>
-                  <Text style={historyItem.type === 'stock_in' ? styles.historyIconIn : styles.historyIconOut}>
-                    {historyItem.type === 'stock_in' ? '➕' : '➖'}
-                  </Text>
-                </View>
-                <View style={styles.historyDetails}>
-                  <Text style={styles.historyType}>
-                    {historyItem.type === 'stock_in' ? 'Stock Added' : 'Item Sold'}
-                  </Text>
-                  <Text style={styles.historyMeta}>
-                    {historyItem.date} • {historyItem.user}
-                  </Text>
-                  {historyItem.notes && (
-                    <Text style={styles.historyNotes}>{historyItem.notes}</Text>
-                  )}
-                </View>
-                <Text style={[
-                  styles.historyQuantity,
-                  historyItem.type === 'stock_in' ? styles.historyQuantityPositive : styles.historyQuantityNegative
-                ]}>
-                  {historyItem.type === 'stock_in' ? `+${historyItem.quantity}` : `${historyItem.quantity}`}
-                </Text>
-              </View>
-            )}
-            style={styles.historyList}
-          />
-          
-          <TouchableOpacity style={styles.modalCloseButton} onPress={onClose}>
-            <Text style={styles.modalCloseButtonText}>Close</Text>
-          </TouchableOpacity>
         </View>
       </View>
     </Modal>
@@ -326,50 +318,61 @@ export default function InventoryScreen() {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+
   const [addStockOpen, setAddStockOpen] = useState(false);
   const [saleItem, setSaleItem] = useState<InventoryItem | null>(null);
-  const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null);
-  const [pendingCount, setPendingCount] = useState(2);
-
-  const admin = true; // Replace with actual role check
+  const [historyItem, setHistoryItem] = useState<HistoryModalItem | null>(null);
 
   const loadItems = async () => {
     setLoading(true);
-    // Replace with actual API call
-    // const data = await api.get('/inventory/vehicles');
-    // setItems(data);
-    setLoading(false);
-  };
 
-  const loadPendingCount = async () => {
-    if (!admin) return;
     // Replace with actual API call
-    // const pending = await api.get('/sales/pending');
-    // setPendingCount(pending.length);
+    // Example:
+    // const partsResponse = await inventoryApi.getParts();
+    // const vehiclesResponse = await inventoryApi.getVehicles();
+    // setItems([...parts, ...vehicles]);
+
+    setLoading(false);
   };
 
   useEffect(() => {
     loadItems();
-    loadPendingCount();
   }, []);
 
   const onRefresh = async () => {
     setRefreshing(true);
     await loadItems();
-    await loadPendingCount();
     setRefreshing(false);
   };
 
   const handleSuccess = () => {
     loadItems();
-    loadPendingCount();
+  };
+
+  const openItemHistory = (item: InventoryItem) => {
+    const itemType: 'vehicle' | 'part' = item.item_type || 'part';
+
+    setHistoryItem({
+      id: item.id,
+      name: item.name,
+      type: itemType,
+      sku:
+        itemType === 'vehicle'
+          ? item.chassis_number || item.id
+          : item.part_number || item.id,
+      current_quantity: item.quantity,
+      unit_price: item.unit_price,
+    });
   };
 
   const filteredItems = items.filter((item) => {
     const query = search.toLowerCase();
+
     return (
       item.name.toLowerCase().includes(query) ||
-      item.specifications.toLowerCase().includes(query)
+      item.specifications.toLowerCase().includes(query) ||
+      item.part_number?.toLowerCase().includes(query) ||
+      item.chassis_number?.toLowerCase().includes(query)
     );
   });
 
@@ -379,15 +382,15 @@ export default function InventoryScreen() {
     <InventoryCard
       item={item}
       onAddStock={() => setAddStockOpen(true)}
-      onRequestSale={(item) => setSaleItem(item)}
-      onViewHistory={(item) => setHistoryItem(item)}
+      onRequestSale={(selectedItem) => setSaleItem(selectedItem)}
+      onViewHistory={openItemHistory}
     />
   );
 
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" />
-      
+
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Inventory</Text>
@@ -395,19 +398,18 @@ export default function InventoryScreen() {
           {items.length} items • {lowStockCount} low stock
         </Text>
       </View>
-      
+
       {/* Action Buttons */}
+      {/* Removed the top History/Pending button because history is already in the nav bar */}
       <View style={styles.actionBar}>
-        <TouchableOpacity style={styles.addStockMainButton} onPress={() => setAddStockOpen(true)}>
+        <TouchableOpacity
+          style={styles.addStockMainButton}
+          onPress={() => setAddStockOpen(true)}
+        >
           <Text style={styles.addStockMainButtonText}>+ Add Stock</Text>
         </TouchableOpacity>
-        {admin && pendingCount > 0 && (
-          <TouchableOpacity style={styles.pendingButton}>
-            <Text style={styles.pendingButtonText}>⚠️ {pendingCount} Pending</Text>
-          </TouchableOpacity>
-        )}
       </View>
-      
+
       {/* Search Bar */}
       <View style={styles.searchContainer}>
         <TextInput
@@ -418,7 +420,7 @@ export default function InventoryScreen() {
           onChangeText={setSearch}
         />
       </View>
-      
+
       {/* Items List */}
       {loading ? (
         <View style={styles.loadingContainer}>
@@ -427,7 +429,11 @@ export default function InventoryScreen() {
       ) : filteredItems.length === 0 ? (
         <View style={styles.emptyContainer}>
           <Text style={styles.emptyText}>No items found.</Text>
-          <TouchableOpacity style={styles.emptyButton} onPress={() => setAddStockOpen(true)}>
+
+          <TouchableOpacity
+            style={styles.emptyButton}
+            onPress={() => setAddStockOpen(true)}
+          >
             <Text style={styles.emptyButtonText}>+ Add your first item</Text>
           </TouchableOpacity>
         </View>
@@ -438,12 +444,16 @@ export default function InventoryScreen() {
           renderItem={renderItem}
           contentContainerStyle={styles.listContent}
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#ef4444" />
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor="#ef4444"
+            />
           }
           showsVerticalScrollIndicator={false}
         />
       )}
-      
+
       {/* Modals */}
       <AddStockModal
         visible={addStockOpen}
@@ -451,12 +461,14 @@ export default function InventoryScreen() {
         items={items}
         onSuccess={handleSuccess}
       />
+
       <RequestSaleModal
         visible={!!saleItem}
         onClose={() => setSaleItem(null)}
         item={saleItem}
         onSuccess={handleSuccess}
       />
+
       <ItemHistoryModal
         visible={!!historyItem}
         onClose={() => setHistoryItem(null)}
@@ -488,7 +500,7 @@ const styles = StyleSheet.create({
   },
   actionBar: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
     alignItems: 'center',
     paddingHorizontal: 20,
     marginBottom: 16,
@@ -503,17 +515,6 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '600',
     fontSize: 14,
-  },
-  pendingButton: {
-    backgroundColor: '#334155',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-  },
-  pendingButtonText: {
-    color: '#fbbf24',
-    fontSize: 12,
-    fontWeight: '500',
   },
   searchContainer: {
     paddingHorizontal: 20,
@@ -579,6 +580,7 @@ const styles = StyleSheet.create({
   cardActions: {
     flexDirection: 'row',
     gap: 12,
+    flexWrap: 'wrap',
   },
   addStockButton: {
     backgroundColor: 'rgba(239, 68, 68, 0.1)',
@@ -642,6 +644,7 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: '600',
   },
+
   // Modal Styles
   modalOverlay: {
     flex: 1,
@@ -655,9 +658,6 @@ const styles = StyleSheet.create({
     padding: 20,
     width: '90%',
     maxHeight: '80%',
-  },
-  modalLarge: {
-    maxHeight: '90%',
   },
   modalTitle: {
     fontSize: 24,
@@ -757,83 +757,5 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 14,
     fontWeight: '500',
-  },
-  modalCloseButton: {
-    backgroundColor: '#334155',
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginTop: 16,
-  },
-  modalCloseButtonText: {
-    color: '#ffffff',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  // History Modal Styles
-  historyHeader: {
-    marginBottom: 20,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#334155',
-  },
-  historyItemName: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#ffffff',
-    marginBottom: 4,
-  },
-  historyCurrentStock: {
-    fontSize: 14,
-    color: '#94a3b8',
-  },
-  historyList: {
-    maxHeight: 400,
-  },
-  historyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#334155',
-  },
-  historyIconContainer: {
-    width: 40,
-    alignItems: 'center',
-  },
-  historyIconIn: {
-    fontSize: 20,
-  },
-  historyIconOut: {
-    fontSize: 20,
-  },
-  historyDetails: {
-    flex: 1,
-    marginLeft: 12,
-  },
-  historyType: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#ffffff',
-  },
-  historyMeta: {
-    fontSize: 11,
-    color: '#64748b',
-    marginTop: 2,
-  },
-  historyNotes: {
-    fontSize: 11,
-    color: '#94a3b8',
-    marginTop: 2,
-  },
-  historyQuantity: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  historyQuantityPositive: {
-    color: '#22c55e',
-  },
-  historyQuantityNegative: {
-    color: '#ef4444',
   },
 });

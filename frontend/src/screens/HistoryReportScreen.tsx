@@ -26,7 +26,12 @@ interface HistoryEntry {
   transaction_type: string;
   quantity_change: number;
   quantity_after: number;
-  performed_by: string;
+
+  performed_by?: string;
+  performed_by_name?: string;
+  confirmed_by?: string;
+  confirmed_by_name?: string;
+
   notes: string;
   created_date: string;
 
@@ -39,7 +44,6 @@ interface HistoryEntry {
   pending_amount?: number;
   remaining_amount?: number;
 
-  // UI-calculated values
   display_quantity_change?: number;
   display_stock_after?: number | string;
 }
@@ -131,6 +135,34 @@ const normalizeType = (type: string) => {
   return (type || '').toLowerCase();
 };
 
+const isUuid = (value?: string) => {
+  if (!value) return false;
+
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    value
+  );
+};
+
+const getPerformedByDisplay = (entry: {
+  performed_by?: string;
+  performed_by_name?: string;
+  confirmed_by?: string;
+  confirmed_by_name?: string;
+}) => {
+  if (entry.performed_by_name) return entry.performed_by_name;
+  if (entry.confirmed_by_name) return entry.confirmed_by_name;
+
+  if (entry.performed_by && !isUuid(entry.performed_by)) {
+    return entry.performed_by;
+  }
+
+  if (entry.confirmed_by && !isUuid(entry.confirmed_by)) {
+    return entry.confirmed_by;
+  }
+
+  return 'System';
+};
+
 const isCustomerRelatedTransaction = (type: string) => {
   return ['reserved', 'sold', 'sale_confirmed', 'returned'].includes(
     normalizeType(type)
@@ -216,25 +248,15 @@ const applyPartDisplayStockValues = (entries: HistoryEntry[], part: any) => {
       display_stock_after: runningAvailableStock,
     };
 
-    // Reverse the transaction so the next older row gets the available stock
-    // that existed immediately after that older transaction.
     if (isStockInType(transactionType)) {
-      // Stock added increased available stock, so reverse by subtracting it.
       runningAvailableStock = Math.max(0, runningAvailableStock - movedQty);
     } else if (isReservedType(transactionType)) {
-      // Reservation decreased available stock, so reverse by adding it back.
       runningAvailableStock += movedQty;
     } else if (isSaleType(transactionType)) {
-      // In this workflow, sale confirmation usually sells already-reserved stock.
-      // Available stock stays the same during confirmation, so no reverse change.
       runningAvailableStock = runningAvailableStock;
     } else if (isReturnedType(transactionType)) {
-      // Returning/releasing reserved stock increased available stock,
-      // so reverse by subtracting that returned amount.
       runningAvailableStock = Math.max(0, runningAvailableStock - movedQty);
     } else {
-      // Generic fallback: after = before + display change,
-      // therefore before = after - display change.
       runningAvailableStock = Math.max(
         0,
         runningAvailableStock - displayQuantityChange
@@ -276,7 +298,10 @@ const getCustomerContextLabel = (entry: HistoryEntry) => {
 
 const getNeedToPayText = (entry: HistoryEntry) => {
   if (entry.remaining_amount === undefined) return '—';
-  return entry.remaining_amount > 0 ? formatMoney(entry.remaining_amount) : 'Fully paid';
+
+  return entry.remaining_amount > 0
+    ? formatMoney(entry.remaining_amount)
+    : 'Fully paid';
 };
 
 const getDisplayChange = (entry: HistoryEntry) => {
@@ -310,6 +335,7 @@ const HistoryCard = ({
   const displayStockAfter = getDisplayStockAfter(entry);
   const isPositive = displayChange > 0;
   const customerContext = getCustomerContextLabel(entry);
+  const performedByDisplay = getPerformedByDisplay(entry);
 
   return (
     <TouchableOpacity onPress={onPress} activeOpacity={0.7}>
@@ -382,7 +408,7 @@ const HistoryCard = ({
         ) : null}
 
         <View style={styles.cardFooter}>
-          <Text style={styles.performedBy}>by {entry.performed_by || 'System'}</Text>
+          <Text style={styles.performedBy}>by {performedByDisplay}</Text>
           <Text style={styles.date}>{formatDate(entry.created_date)}</Text>
         </View>
 
@@ -416,6 +442,7 @@ const TableRow = ({
   const isPositive = displayChange > 0;
   const customerContext = getCustomerContextLabel(entry);
   const needToPayText = getNeedToPayText(entry);
+  const performedByDisplay = getPerformedByDisplay(entry);
 
   const needToPayStyle =
     entry.remaining_amount === undefined
@@ -492,7 +519,7 @@ const TableRow = ({
         </View>
 
         <Text style={[styles.tableCellText, styles.byCell]}>
-          {entry.performed_by || 'System'}
+          {performedByDisplay}
         </Text>
 
         <Text style={[styles.tableCellText, styles.notesCell]} numberOfLines={1}>
@@ -539,6 +566,7 @@ export default function HistoryReportScreen() {
 
       const totalConfirmed = toNumber(paymentData?.summary?.total_confirmed);
       const totalPending = toNumber(paymentData?.summary?.total_pending);
+
       const totalSubmitted =
         toNumber(paymentData?.summary?.total_submitted) ||
         totalConfirmed + totalPending;
@@ -557,9 +585,7 @@ export default function HistoryReportScreen() {
           orderDetails?.customer?.full_name ||
           paymentData?.order?.customer_name ||
           '',
-        customerPhone:
-          orderDetails?.customer?.phone ||
-          '',
+        customerPhone: orderDetails?.customer?.phone || '',
         totalAmount,
         submittedAmount: totalSubmitted,
         confirmedAmount: totalConfirmed,
@@ -660,7 +686,15 @@ export default function HistoryReportScreen() {
               quantity_after: vehicleDisplayChange === -1 ? 0 : 1,
               display_quantity_change: vehicleDisplayChange,
               display_stock_after: getVehicleStockAfter(eventType),
-              performed_by: trans.performed_by || 'System',
+
+              performed_by: trans.performed_by || undefined,
+              performed_by_name:
+                trans.performed_by_name ||
+                trans.confirmed_by_name ||
+                undefined,
+              confirmed_by: trans.confirmed_by || undefined,
+              confirmed_by_name: trans.confirmed_by_name || undefined,
+
               notes: trans.notes || '',
               created_date: trans.created_at,
             },
@@ -706,7 +740,15 @@ export default function HistoryReportScreen() {
               transaction_type: transactionType,
               quantity_change: toNumber(trans.quantity_change),
               quantity_after: toNumber(trans.quantity_after),
-              performed_by: trans.performed_by || 'System',
+
+              performed_by: trans.performed_by || undefined,
+              performed_by_name:
+                trans.performed_by_name ||
+                trans.confirmed_by_name ||
+                undefined,
+              confirmed_by: trans.confirmed_by || undefined,
+              confirmed_by_name: trans.confirmed_by_name || undefined,
+
               notes: trans.notes || '',
               created_date: trans.created_at,
             },
@@ -747,7 +789,7 @@ export default function HistoryReportScreen() {
   };
 
   const uniqueUsers = useMemo(() => {
-    const users = new Set(history.map((h) => h.performed_by || 'System'));
+    const users = new Set(history.map((h) => getPerformedByDisplay(h)));
     return Array.from(users).sort();
   }, [history]);
 
@@ -758,7 +800,7 @@ export default function HistoryReportScreen() {
       const itemName = (entry.item_name || '').toLowerCase();
       const specs = (entry.specifications || '').toLowerCase();
       const notes = (entry.notes || '').toLowerCase();
-      const performedBy = (entry.performed_by || 'system').toLowerCase();
+      const performedBy = getPerformedByDisplay(entry).toLowerCase();
       const customerName = (entry.customer_name || '').toLowerCase();
       const orderNumber = (entry.order_number || '').toLowerCase();
 
@@ -778,7 +820,7 @@ export default function HistoryReportScreen() {
         return false;
       }
 
-      if (userFilter !== 'all' && (entry.performed_by || 'System') !== userFilter) {
+      if (userFilter !== 'all' && getPerformedByDisplay(entry) !== userFilter) {
         return false;
       }
 
@@ -865,7 +907,7 @@ export default function HistoryReportScreen() {
       entry.remaining_amount ?? '',
       getDisplayChange(entry),
       getDisplayStockAfter(entry),
-      entry.performed_by || 'System',
+      getPerformedByDisplay(entry),
       entry.notes || '',
     ]);
 

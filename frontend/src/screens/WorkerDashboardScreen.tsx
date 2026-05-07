@@ -10,11 +10,14 @@ import {
   RefreshControl,
   Alert,
   ActivityIndicator,
+  ScrollView,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import AddStockModal from '../components/AddStockModal';
 import RequestSaleModal from '../components/RequestSaleModal';
+import ItemHistoryModal from '../components/ItemHistoryModal';
 import { inventoryApi } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
 interface InventoryItem {
   id: string;
@@ -27,6 +30,15 @@ interface InventoryItem {
   status?: string;
   available_quantity?: number;
   reserved_quantity?: number;
+}
+
+interface HistoryModalItem {
+  id: string;
+  name: string;
+  type: 'vehicle' | 'part';
+  sku?: string;
+  current_quantity: number;
+  unit_price: number;
 }
 
 const InventoryCard = ({
@@ -111,7 +123,10 @@ const InventoryCard = ({
         </TouchableOpacity>
 
         {!isSoldOut && !isReserved && availableQty > 0 ? (
-          <TouchableOpacity style={styles.requestSaleButton} onPress={onRequestSale}>
+          <TouchableOpacity
+            style={styles.requestSaleButton}
+            onPress={onRequestSale}
+          >
             <Text style={styles.requestSaleButtonText}>Request Sale</Text>
           </TouchableOpacity>
         ) : null}
@@ -132,6 +147,7 @@ const InventoryCard = ({
 
 export default function WorkerDashboardScreen() {
   const navigation = useNavigation();
+  const { user, logout } = useAuth();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
@@ -141,6 +157,10 @@ export default function WorkerDashboardScreen() {
   const [addStockModalVisible, setAddStockModalVisible] = useState(false);
   const [requestSaleModalVisible, setRequestSaleModalVisible] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
+
+  const [itemHistoryVisible, setItemHistoryVisible] = useState(false);
+  const [selectedHistoryItem, setSelectedHistoryItem] =
+    useState<HistoryModalItem | null>(null);
 
   const loadInventory = async () => {
     try {
@@ -158,22 +178,34 @@ export default function WorkerDashboardScreen() {
 
       const partsRes = await inventoryApi.getParts();
 
-      const parts = (partsRes.data.data || []).map((p: any) => ({
-        id: p.id,
-        name: p.name,
-        specifications: p.specifications || '',
-        quantity: Number(p.quantity || 0),
-        unit_price: Number(p.unit_price || 0),
-        part_number: p.part_number,
-        available_quantity:
-          Number(p.quantity || 0) - Number(p.reserved_quantity || 0),
-        reserved_quantity: Number(p.reserved_quantity || 0),
-      }));
+      const parts = (partsRes.data.data || []).map((p: any) => {
+        const totalQuantity = Number(p.quantity || 0);
+        const reservedQuantity = Number(p.reserved_quantity || 0);
+
+        return {
+          id: p.id,
+          name: p.name,
+          specifications: p.specifications || '',
+          quantity: totalQuantity,
+          unit_price: Number(p.unit_price || 0),
+          part_number: p.part_number,
+          available_quantity: Math.max(0, totalQuantity - reservedQuantity),
+          reserved_quantity: reservedQuantity,
+        };
+      });
 
       setInventory([...vehicles, ...parts]);
-    } catch (error) {
-      console.error('Error loading inventory:', error);
-      Alert.alert('Error', 'Failed to load inventory');
+    } catch (error: any) {
+      console.error('Error loading inventory:', {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message,
+      });
+
+      Alert.alert(
+        'Error',
+        error.response?.data?.error || 'Failed to load inventory'
+      );
     }
   };
 
@@ -197,6 +229,20 @@ export default function WorkerDashboardScreen() {
     setRefreshing(true);
     await loadAllData();
     setRefreshing(false);
+  };
+
+  const handleLogout = () => {
+    Alert.alert('Logout', 'Are you sure you want to logout?', [
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+      {
+        text: 'Logout',
+        style: 'destructive',
+        onPress: logout,
+      },
+    ]);
   };
 
   const handleAddStockSuccess = () => {
@@ -229,6 +275,31 @@ export default function WorkerDashboardScreen() {
     return item.chassis_number ? 'vehicle' : 'part';
   };
 
+  const handleViewItemHistory = (item: InventoryItem) => {
+    const itemType = determineItemType(item);
+
+    setSelectedHistoryItem({
+      id: item.id,
+      name: item.name,
+      type: itemType,
+      sku: itemType === 'vehicle' ? item.chassis_number : item.part_number,
+      current_quantity:
+        itemType === 'vehicle'
+          ? item.status === 'available'
+            ? 1
+            : 0
+          : item.quantity,
+      unit_price: item.unit_price,
+    });
+
+    setItemHistoryVisible(true);
+  };
+
+  const closeItemHistory = () => {
+    setItemHistoryVisible(false);
+    setSelectedHistoryItem(null);
+  };
+
   const filteredInventory = inventory.filter((item) => {
     const query = searchQuery.toLowerCase();
 
@@ -244,8 +315,9 @@ export default function WorkerDashboardScreen() {
     return inventory.filter(
       (item) =>
         !item.chassis_number &&
-        (item.available_quantity !== undefined ? item.available_quantity : item.quantity) <
-          5
+        (item.available_quantity !== undefined
+          ? item.available_quantity
+          : item.quantity) < 5
     ).length;
   };
 
@@ -254,7 +326,7 @@ export default function WorkerDashboardScreen() {
       item={item}
       onAddStock={() => setAddStockModalVisible(true)}
       onRequestSale={() => handleRequestSale(item)}
-      onViewHistory={navigateToHistory}
+      onViewHistory={() => handleViewItemHistory(item)}
     />
   );
 
@@ -271,25 +343,52 @@ export default function WorkerDashboardScreen() {
       <StatusBar barStyle="light-content" />
 
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Inventory</Text>
+        <View style={styles.headerTopRow}>
+          <View style={styles.headerTextContainer}>
+            <Text style={styles.headerTitle}>Inventory</Text>
 
-        <Text style={styles.headerSubtitle}>
-          {filteredInventory.length} items • {getLowStockCount()} low stock
-        </Text>
+            <Text style={styles.headerSubtitle}>
+              {filteredInventory.length} items • {getLowStockCount()} low stock
+            </Text>
+
+            <Text style={styles.userText} numberOfLines={1}>
+              {user?.full_name || 'Worker'} • {user?.email}
+            </Text>
+          </View>
+
+          <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+            <Text style={styles.logoutButtonText}>Logout</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
-      <View style={styles.tabBar}>
-        <TouchableOpacity style={[styles.tab, styles.tabActive]}>
-          <Text style={[styles.tabText, styles.tabTextActive]}>📦 Inventory</Text>
-        </TouchableOpacity>
+      <View style={styles.tabBarWrapper}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.tabBarContent}
+        >
+          <TouchableOpacity style={[styles.tab, styles.tabActive]}>
+            <Text style={[styles.tabText, styles.tabTextActive]}>
+              📦 Inventory
+            </Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity style={styles.tab} onPress={navigateToWorkerPendingRequests}>
-          <Text style={styles.tabText}>📋 My Requests</Text>
-        </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.tab}
+            onPress={navigateToWorkerPendingRequests}
+          >
+            <Text style={styles.tabText}>📋 My Requests</Text>
+          </TouchableOpacity>
 
-        <TouchableOpacity style={styles.tab} onPress={navigateToCustomers}>
-          <Text style={styles.tabText}>👥 Customers</Text>
-        </TouchableOpacity>
+          <TouchableOpacity style={styles.tab} onPress={navigateToCustomers}>
+            <Text style={styles.tabText}>👥 Customers</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.tab} onPress={navigateToHistory}>
+            <Text style={styles.tabText}>📜 History</Text>
+          </TouchableOpacity>
+        </ScrollView>
       </View>
 
       <View style={styles.actionBar}>
@@ -305,21 +404,21 @@ export default function WorkerDashboardScreen() {
           />
         </View>
 
-        <TouchableOpacity
-          style={styles.addStockTopButton}
-          onPress={() => setAddStockModalVisible(true)}
-        >
-          <Text style={styles.addStockTopButtonText}>+ Add Stock</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={styles.historyHeaderButton} onPress={navigateToHistory}>
-          <Text style={styles.historyHeaderButtonText}>📜 History</Text>
-        </TouchableOpacity>
+        <View style={styles.actionButtonRow}>
+          <TouchableOpacity
+            style={styles.addStockTopButton}
+            onPress={() => setAddStockModalVisible(true)}
+          >
+            <Text style={styles.addStockTopButtonText}>+ Add Stock</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <FlatList
         data={filteredInventory}
-        keyExtractor={(item) => `${item.id}-${item.chassis_number || item.part_number || item.name}`}
+        keyExtractor={(item) =>
+          `${item.id}-${item.chassis_number || item.part_number || item.name}`
+        }
         renderItem={renderInventoryItem}
         contentContainerStyle={styles.listContent}
         refreshControl={
@@ -347,7 +446,10 @@ export default function WorkerDashboardScreen() {
             model: item.name,
             chassis_number: item.chassis_number!,
             specifications: item.specifications,
-            status: (item.status || 'available') as 'available' | 'reserved' | 'sold',
+            status: (item.status || 'available') as
+              | 'available'
+              | 'reserved'
+              | 'sold',
             unit_price: item.unit_price,
           }))}
         parts={inventory
@@ -360,6 +462,8 @@ export default function WorkerDashboardScreen() {
             unit_price: item.unit_price,
             min_stock_alert: 5,
             part_number: item.part_number,
+            reserved_quantity: item.reserved_quantity,
+            available_quantity: item.available_quantity,
           }))}
         onSuccess={handleAddStockSuccess}
       />
@@ -374,18 +478,27 @@ export default function WorkerDashboardScreen() {
           selectedItem
             ? {
                 id: selectedItem.id,
-                part_id: selectedItem.chassis_number ? undefined : selectedItem.id,
+
+                vehicle_id: selectedItem.chassis_number
+                  ? selectedItem.id
+                  : undefined,
+                part_id: selectedItem.chassis_number
+                  ? undefined
+                  : selectedItem.id,
+
                 name: selectedItem.name,
                 specifications: selectedItem.specifications,
                 quantity: selectedItem.chassis_number
-                  ? selectedItem.quantity
+                  ? 1
                   : selectedItem.available_quantity !== undefined
                     ? selectedItem.available_quantity
                     : selectedItem.quantity,
                 unit_price: selectedItem.unit_price,
+
                 ...(selectedItem.chassis_number && {
                   chassis_number: selectedItem.chassis_number,
                 }),
+
                 ...(selectedItem.part_number && {
                   part_number: selectedItem.part_number,
                 }),
@@ -395,6 +508,12 @@ export default function WorkerDashboardScreen() {
         itemType={selectedItem ? determineItemType(selectedItem) : 'part'}
         customers={[]}
         onSuccess={handleRequestSaleSuccess}
+      />
+
+      <ItemHistoryModal
+        visible={itemHistoryVisible}
+        onClose={closeItemHistory}
+        item={selectedHistoryItem}
       />
     </View>
   );
@@ -412,12 +531,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#0f172a',
   },
   header: {
-    paddingTop: 60,
+    paddingTop: 58,
     paddingHorizontal: 20,
-    paddingBottom: 16,
+    paddingBottom: 14,
+  },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  headerTextContainer: {
+    flex: 1,
   },
   headerTitle: {
-    fontSize: 34,
+    fontSize: 32,
     fontWeight: 'bold',
     color: '#ffffff',
     marginBottom: 4,
@@ -426,38 +554,62 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#94a3b8',
   },
-  tabBar: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-    gap: 24,
+  userText: {
+    fontSize: 11,
+    color: '#64748b',
+    marginTop: 4,
+    maxWidth: 240,
+  },
+  logoutButton: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.35)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  logoutButtonText: {
+    color: '#ef4444',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  tabBarWrapper: {
     borderBottomWidth: 1,
     borderBottomColor: '#334155',
   },
+  tabBarContent: {
+    paddingHorizontal: 20,
+    gap: 12,
+    paddingRight: 28,
+  },
   tab: {
     paddingVertical: 12,
+    paddingHorizontal: 10,
+    minWidth: 110,
+    alignItems: 'center',
   },
   tabActive: {
     borderBottomWidth: 2,
     borderBottomColor: '#ef4444',
   },
   tabText: {
-    fontSize: 16,
+    fontSize: 15,
     color: '#94a3b8',
-    fontWeight: '500',
+    fontWeight: '600',
   },
   tabTextActive: {
     color: '#ef4444',
   },
   actionBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
     paddingHorizontal: 20,
     paddingVertical: 12,
+    gap: 10,
+  },
+  actionButtonRow: {
+    flexDirection: 'row',
     gap: 8,
-    flexWrap: 'wrap',
   },
   searchContainer: {
-    flex: 2,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#1e293b',
@@ -465,7 +617,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#334155',
     paddingHorizontal: 10,
-    minWidth: 150,
   },
   searchIcon: {
     fontSize: 14,
@@ -479,26 +630,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   addStockTopButton: {
+    flex: 1,
     backgroundColor: '#ef4444',
     paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 8,
+    alignItems: 'center',
   },
   addStockTopButtonText: {
     color: '#ffffff',
-    fontWeight: '600',
+    fontWeight: '700',
     fontSize: 13,
-  },
-  historyHeaderButton: {
-    backgroundColor: '#334155',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  historyHeaderButtonText: {
-    color: '#94a3b8',
-    fontSize: 13,
-    fontWeight: '500',
   },
   listContent: {
     paddingHorizontal: 20,
