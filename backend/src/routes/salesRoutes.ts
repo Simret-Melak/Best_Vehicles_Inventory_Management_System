@@ -3,6 +3,7 @@ import {
   getSalesOrders,
   getSalesOrderById,
   createSalesOrder,
+  updateSaleRequest,
   updateOrderStatus,
   workerConfirmFullPayment,
   cancelOrder,
@@ -28,11 +29,18 @@ router.get('/', requireAuth, requireInventoryReadAccess, getSalesOrders);
 
 router.get('/:id', requireAuth, requireInventoryReadAccess, getSalesOrderById);
 
-// Worker only:
-// Workers create sale requests.
+// Worker creates sale requests
 router.post('/', requireAuth, requireSalesRequestAccess, createSalesOrder);
 
-// Admin + super_admin only:
+// Worker edits sale request before admin approval
+// Backend controller should only allow edit if status is pending or pending_admin
+router.put(
+  '/:id/request',
+  requireAuth,
+  requireSalesRequestAccess,
+  updateSaleRequest
+);
+
 // Admin approval changes pending_admin -> confirmed/cancelled/etc.
 router.put(
   '/:id/status',
@@ -41,9 +49,7 @@ router.put(
   updateOrderStatus
 );
 
-// Worker only:
-// Kept for compatibility, but your newer backend can auto-move full submitted
-// payments to pending_admin. Use only if your frontend still calls it.
+// Worker confirms/updates payment progress
 router.put(
   '/:id/confirm-full-payment',
   requireAuth,
@@ -51,8 +57,7 @@ router.put(
   workerConfirmFullPayment
 );
 
-// Admin + super_admin only:
-// Cancel order and release reservations.
+// Admin cancels order and releases reservations
 router.put(
   '/:id/cancel',
   requireAuth,
@@ -60,8 +65,7 @@ router.put(
   cancelOrder
 );
 
-// Admin + super_admin only:
-// Delete cancelled orders.
+// Admin deletes cancelled orders
 router.delete(
   '/:id',
   requireAuth,

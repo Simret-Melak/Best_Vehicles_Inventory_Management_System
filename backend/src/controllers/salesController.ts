@@ -1,11 +1,37 @@
 import { Request, Response } from 'express';
 import { supabase } from '../config/supabase';
+import { AuthenticatedRequest } from '../middleware/authMiddleware';
 
 const TERMINAL_ORDER_STATUSES = ['confirmed', 'completed', 'cancelled'];
 
 // ============================================
 // HELPERS
 // ============================================
+
+const toNumber = (value: any) => {
+  const numberValue = Number(value || 0);
+  return Number.isNaN(numberValue) ? 0 : numberValue;
+};
+
+const cleanNullable = (value: any) => {
+  if (value === undefined || value === null || value === '') return null;
+  return value;
+};
+
+const getActor = (req: Request, fallbackName = 'Worker') => {
+  const authReq = req as AuthenticatedRequest;
+
+  return {
+    id: cleanNullable(authReq.user?.id || req.body?.performed_by),
+    name: cleanNullable(
+      authReq.user?.full_name ||
+        authReq.user?.email ||
+        req.body?.performed_by_name ||
+        fallbackName
+    ),
+    role: authReq.user?.role,
+  };
+};
 
 async function getSubmittedPaymentTotal(orderId: string) {
   const { data, error } = await supabase
@@ -21,7 +47,38 @@ async function getSubmittedPaymentTotal(orderId: string) {
   }, 0);
 }
 
-async function updateOrderStatusFromSubmittedPayments(orderId: string) {
+async function generateUniqueOrderNumber() {
+  const yearPrefix = new Date().getFullYear().toString().slice(-2);
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const timestampPart = Date.now().toString().slice(-7);
+    const randomPart = Math.floor(Math.random() * 10000)
+      .toString()
+      .padStart(4, '0');
+
+    const candidate = `SO${yearPrefix}${timestampPart}${randomPart}`;
+
+    const { data: existingOrder, error } = await supabase
+      .from('sales_orders')
+      .select('id')
+      .eq('order_number', candidate)
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!existingOrder) {
+      return candidate;
+    }
+  }
+
+  throw new Error('Failed to generate unique order number');
+}
+
+async function updateOrderStatusFromSubmittedPayments(
+  orderId: string,
+  performedBy: string | null = null,
+  performedByName: string | null = null
+) {
   const { data: order, error: orderError } = await supabase
     .from('sales_orders')
     .select('id, total_amount, status')
@@ -53,6 +110,8 @@ async function updateOrderStatusFromSubmittedPayments(orderId: string) {
       action: 'payment_progress_updated',
       old_status: order.status,
       new_status: newStatus,
+      performed_by: performedBy,
+      performed_by_name: performedByName,
       notes:
         newStatus === 'pending_admin'
           ? 'Full payment submitted by worker, waiting for admin approval'
@@ -63,7 +122,12 @@ async function updateOrderStatusFromSubmittedPayments(orderId: string) {
   return newStatus;
 }
 
-async function reserveOrderItems(orderId: string, performedBy: string | null = null) {
+async function reserveOrderItems(
+  orderId: string,
+  performedBy: string | null = null,
+  performedByName: string | null = null,
+  customerId: string | null = null
+) {
   const { data: items, error: itemsError } = await supabase
     .from('sales_order_items')
     .select('*')
@@ -74,25 +138,50 @@ async function reserveOrderItems(orderId: string, performedBy: string | null = n
 
   for (const item of items) {
     if (item.item_type === 'vehicle' && item.vehicle_id) {
-      const { data: vehicle } = await supabase
+      const { data: vehicle, error: vehicleError } = await supabase
         .from('vehicles')
         .select('status')
         .eq('id', item.vehicle_id)
         .single();
 
+      if (vehicleError) throw vehicleError;
+
       if (vehicle?.status === 'available') {
-        await supabase
+        const { error: updateVehicleError } = await supabase
           .from('vehicles')
           .update({ status: 'reserved' })
           .eq('id', item.vehicle_id);
 
-        await supabase.from('vehicle_history').insert({
-          vehicle_id: item.vehicle_id,
-          event_type: 'reserved',
-          sales_order_id: orderId,
-          performed_by: performedBy,
-          notes: 'Reserved after worker submitted payment',
-        });
+        if (updateVehicleError) throw updateVehicleError;
+
+        const { data: existingReservedHistory, error: existingHistoryError } =
+          await supabase
+            .from('vehicle_history')
+            .select('id')
+            .eq('vehicle_id', item.vehicle_id)
+            .eq('sales_order_id', orderId)
+            .eq('event_type', 'reserved')
+            .maybeSingle();
+
+        if (existingHistoryError) throw existingHistoryError;
+
+        if (!existingReservedHistory) {
+          const { error: historyError } = await supabase
+            .from('vehicle_history')
+            .insert({
+              vehicle_id: item.vehicle_id,
+              event_type: 'reserved',
+              customer_id: customerId,
+              sales_order_id: orderId,
+              performed_by: performedBy,
+              performed_by_name: performedByName,
+              confirmed_by: null,
+              confirmed_by_name: null,
+              notes: 'Reserved after worker submitted payment',
+            });
+
+          if (historyError) throw historyError;
+        }
       }
     }
 
@@ -107,37 +196,53 @@ async function reserveOrderItems(orderId: string, performedBy: string | null = n
 
       const currentReserved = Number(part?.reserved_quantity || 0);
 
-      const { data: existingReservation } = await supabase
-        .from('part_transactions')
-        .select('id')
-        .eq('part_id', item.part_id)
-        .eq('sales_order_id', orderId)
-        .eq('transaction_type', 'reserved')
-        .maybeSingle();
+      const { data: existingReservation, error: existingReservationError } =
+        await supabase
+          .from('part_transactions')
+          .select('id')
+          .eq('part_id', item.part_id)
+          .eq('sales_order_id', orderId)
+          .eq('transaction_type', 'reserved')
+          .maybeSingle();
+
+      if (existingReservationError) throw existingReservationError;
 
       if (!existingReservation) {
         const newReserved = currentReserved + Number(item.quantity || 0);
 
-        await supabase
+        const { error: updatePartError } = await supabase
           .from('parts')
           .update({ reserved_quantity: newReserved })
           .eq('id', item.part_id);
 
-        await supabase.from('part_transactions').insert({
-          part_id: item.part_id,
-          transaction_type: 'reserved',
-          quantity_change: item.quantity,
-          quantity_after: newReserved,
-          sales_order_id: orderId,
-          performed_by: performedBy,
-          notes: 'Reserved after worker submitted payment',
-        });
+        if (updatePartError) throw updatePartError;
+
+        const { error: transactionError } = await supabase
+          .from('part_transactions')
+          .insert({
+            part_id: item.part_id,
+            transaction_type: 'reserved',
+            quantity_change: item.quantity,
+            quantity_after: newReserved,
+            sales_order_id: orderId,
+            performed_by: performedBy,
+            performed_by_name: performedByName,
+            confirmed_by: null,
+            confirmed_by_name: null,
+            notes: 'Reserved after worker submitted payment',
+          });
+
+        if (transactionError) throw transactionError;
       }
     }
   }
 }
 
-async function releaseReservedItems(orderId: string, performedBy: string | null = null) {
+async function releaseReservedItems(
+  orderId: string,
+  performedBy: string | null = null,
+  performedByName: string | null = null
+) {
   const { data: items, error: itemsError } = await supabase
     .from('sales_order_items')
     .select('*')
@@ -148,18 +253,25 @@ async function releaseReservedItems(orderId: string, performedBy: string | null 
 
   for (const item of items) {
     if (item.item_type === 'vehicle' && item.vehicle_id) {
-      await supabase
+      const { error: updateVehicleError } = await supabase
         .from('vehicles')
         .update({ status: 'available' })
         .eq('id', item.vehicle_id);
 
-      await supabase.from('vehicle_history').insert({
-        vehicle_id: item.vehicle_id,
-        event_type: 'returned',
-        sales_order_id: orderId,
-        performed_by: performedBy,
-        notes: 'Order cancelled - vehicle returned to inventory',
-      });
+      if (updateVehicleError) throw updateVehicleError;
+
+      const { error: historyError } = await supabase
+        .from('vehicle_history')
+        .insert({
+          vehicle_id: item.vehicle_id,
+          event_type: 'returned',
+          sales_order_id: orderId,
+          performed_by: performedBy,
+          performed_by_name: performedByName,
+          notes: 'Order cancelled - vehicle returned to inventory',
+        });
+
+      if (historyError) throw historyError;
     }
 
     if (item.item_type === 'part' && item.part_id) {
@@ -176,20 +288,27 @@ async function releaseReservedItems(orderId: string, performedBy: string | null 
         Number(part?.reserved_quantity || 0) - Number(item.quantity || 0)
       );
 
-      await supabase
+      const { error: updatePartError } = await supabase
         .from('parts')
         .update({ reserved_quantity: newReserved })
         .eq('id', item.part_id);
 
-      await supabase.from('part_transactions').insert({
-        part_id: item.part_id,
-        transaction_type: 'returned',
-        quantity_change: -Number(item.quantity || 0),
-        quantity_after: newReserved,
-        sales_order_id: orderId,
-        performed_by: performedBy,
-        notes: 'Order cancelled - reservation released',
-      });
+      if (updatePartError) throw updatePartError;
+
+      const { error: transactionError } = await supabase
+        .from('part_transactions')
+        .insert({
+          part_id: item.part_id,
+          transaction_type: 'returned',
+          quantity_change: -Number(item.quantity || 0),
+          quantity_after: newReserved,
+          sales_order_id: orderId,
+          performed_by: performedBy,
+          performed_by_name: performedByName,
+          notes: 'Order cancelled - reservation released',
+        });
+
+      if (transactionError) throw transactionError;
     }
   }
 }
@@ -197,6 +316,7 @@ async function releaseReservedItems(orderId: string, performedBy: string | null 
 // ============================================
 // GET ALL SALES ORDERS
 // ============================================
+
 export const getSalesOrders = async (req: Request, res: Response) => {
   try {
     const { status, customer_id, limit = 100, offset = 0 } = req.query;
@@ -252,11 +372,20 @@ export const getSalesOrders = async (req: Request, res: Response) => {
       },
       message: 'Sales orders fetched successfully',
     });
-  } catch (error) {
-    console.error('Error fetching sales orders:', error);
+  } catch (error: any) {
+    console.error('Error fetching sales orders:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
+
     res.status(500).json({
       success: false,
-      error: 'Failed to fetch sales orders',
+      error: error.message || 'Failed to fetch sales orders',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
@@ -264,6 +393,7 @@ export const getSalesOrders = async (req: Request, res: Response) => {
 // ============================================
 // GET SINGLE SALES ORDER BY ID
 // ============================================
+
 export const getSalesOrderById = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -379,21 +509,28 @@ export const getSalesOrderById = async (req: Request, res: Response) => {
       },
       message: 'Sales order fetched successfully',
     });
-  } catch (error) {
-    console.error('Error fetching sales order:', error);
+  } catch (error: any) {
+    console.error('Error fetching sales order:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
+
     res.status(500).json({
       success: false,
-      error: 'Failed to fetch sales order',
+      error: error.message || 'Failed to fetch sales order',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
 
 // ============================================
 // CREATE SALES ORDER
-// Partial payment => pending
-// Full payment => pending_admin
-// Both reserve inventory immediately.
 // ============================================
+
 export const createSalesOrder = async (req: Request, res: Response) => {
   try {
     const {
@@ -404,13 +541,26 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       bank_name,
       reference_number,
       deposit_amount,
+      performed_by,
+      performed_by_name,
+      vehicle_id,
+      part_id,
       chassis_number,
       part_number,
       quantity = 1,
       unit_price,
     } = req.body;
 
+    const performedBy = cleanNullable(performed_by);
+    const performedByName = cleanNullable(performed_by_name);
     const paymentAmount = Number(deposit_amount || 0);
+
+    if (!customer_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer ID is required',
+      });
+    }
 
     if (!paymentAmount || paymentAmount <= 0) {
       return res.status(400).json({
@@ -433,222 +583,200 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       });
     }
 
-    let orderItems: any[] = [];
-    const customerId = customer_id;
-    let vehicleInfo: any = null;
-    let partInfo: any = null;
-
-    if (chassis_number) {
-      const { data: vehicle, error: vehicleError } = await supabase
-        .from('vehicles')
-        .select('id, model, unit_price, status, chassis_number, specifications')
-        .eq('chassis_number', chassis_number)
-        .single();
-
-      if (vehicleError || !vehicle) {
-        return res.status(404).json({
-          success: false,
-          error: `Vehicle with chassis number ${chassis_number} not found`,
-        });
-      }
-
-      if (vehicle.status !== 'available') {
-        return res.status(400).json({
-          success: false,
-          error: `Vehicle is not available. Current status: ${vehicle.status}`,
-        });
-      }
-
-      const qty = Number(quantity || 1);
-      const price = Number(unit_price || vehicle.unit_price);
-
-      orderItems.push({
-        item_type: 'vehicle',
-        vehicle_id: vehicle.id,
-        quantity: qty,
-        unit_price: price,
-        subtotal: price * qty,
-      });
-
-      vehicleInfo = vehicle;
-    } else if (part_number) {
-      const { data: part, error: partError } = await supabase
-        .from('parts')
-        .select('id, part_number, name, unit_price, quantity, reserved_quantity, specifications')
-        .eq('part_number', part_number)
-        .single();
-
-      if (partError || !part) {
-        return res.status(404).json({
-          success: false,
-          error: `Part with part number ${part_number} not found`,
-        });
-      }
-
-      const qty = Number(quantity || 1);
-      const availableQty =
-        Number(part.quantity || 0) - Number(part.reserved_quantity || 0);
-
-      if (availableQty < qty) {
-        return res.status(400).json({
-          success: false,
-          error: `Insufficient stock for part. Available: ${availableQty}, Requested: ${qty}`,
-        });
-      }
-
-      const price = Number(unit_price || part.unit_price);
-
-      orderItems.push({
-        item_type: 'part',
-        part_id: part.id,
-        quantity: qty,
-        unit_price: price,
-        subtotal: price * qty,
-      });
-
-      partInfo = part;
-    } else if (items && Array.isArray(items) && items.length > 0) {
-      for (const item of items) {
-        const {
-          item_type,
-          item_id,
-          part_number: itemPartNumber,
-          chassis_number: itemChassisNumber,
-          quantity: itemQty,
-          unit_price: itemPrice,
-        } = item;
-
-        if (item_type === 'vehicle') {
-          let vehicleId = item_id;
-
-          if (itemChassisNumber && !vehicleId) {
-            const { data: vehicleByChassis } = await supabase
-              .from('vehicles')
-              .select('id')
-              .eq('chassis_number', itemChassisNumber)
-              .single();
-
-            if (vehicleByChassis) vehicleId = vehicleByChassis.id;
-          }
-
-          const { data: vehicle, error: vehicleError } = await supabase
-            .from('vehicles')
-            .select('id, unit_price, status, model, chassis_number, specifications')
-            .eq('id', vehicleId)
-            .single();
-
-          if (vehicleError || !vehicle) {
-            return res.status(404).json({
-              success: false,
-              error: `Vehicle with ID ${vehicleId} not found`,
-            });
-          }
-
-          if (vehicle.status !== 'available') {
-            return res.status(400).json({
-              success: false,
-              error: `Vehicle is not available. Current status: ${vehicle.status}`,
-            });
-          }
-
-          const qty = Number(itemQty || 1);
-          const price = Number(itemPrice || vehicle.unit_price);
-
-          orderItems.push({
-            item_type: 'vehicle',
-            vehicle_id: vehicle.id,
-            quantity: qty,
-            unit_price: price,
-            subtotal: price * qty,
-          });
-
-          vehicleInfo = vehicle;
-        }
-
-        if (item_type === 'part') {
-          let part: any = null;
-
-          if (item_id) {
-            const { data, error } = await supabase
-              .from('parts')
-              .select('id, part_number, unit_price, quantity, reserved_quantity, name, specifications')
-              .eq('id', item_id)
-              .maybeSingle();
-
-            if (error) throw error;
-            part = data;
-          }
-
-          if (!part && itemPartNumber) {
-            const { data, error } = await supabase
-              .from('parts')
-              .select('id, part_number, unit_price, quantity, reserved_quantity, name, specifications')
-              .eq('part_number', itemPartNumber)
-              .maybeSingle();
-
-            if (error) throw error;
-            part = data;
-          }
-
-          if (!part) {
-            return res.status(404).json({
-              success: false,
-              error: 'Part not found',
-              debug: {
-                searched_id: item_id || null,
-                searched_part_number: itemPartNumber || null,
-              },
-            });
-          }
-
-          const qty = Number(itemQty || 1);
-          const availableQty =
-            Number(part.quantity || 0) - Number(part.reserved_quantity || 0);
-
-          if (availableQty < qty) {
-            return res.status(400).json({
-              success: false,
-              error: `Insufficient stock for part ${part.name}. Available: ${availableQty}, Requested: ${qty}`,
-            });
-          }
-
-          const price = Number(itemPrice || part.unit_price);
-
-          orderItems.push({
-            item_type: 'part',
-            part_id: part.id,
-            quantity: qty,
-            unit_price: price,
-            subtotal: price * qty,
-          });
-
-          partInfo = part;
-        }
-      }
-    } else {
-      return res.status(400).json({
-        success: false,
-        error: 'Either chassis_number, part_number, or items array is required',
-      });
-    }
-
-    if (!customerId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Customer ID is required',
-      });
-    }
-
     const { data: customer, error: customerError } = await supabase
       .from('customers')
       .select('id, full_name, phone')
-      .eq('id', customerId)
+      .eq('id', customer_id)
       .single();
 
     if (customerError || !customer) {
       return res.status(404).json({
         success: false,
         error: 'Customer not found',
+        details: customerError?.message || null,
+      });
+    }
+
+    const incomingItems =
+      Array.isArray(items) && items.length > 0
+        ? items
+        : [
+            {
+              item_type: vehicle_id || chassis_number ? 'vehicle' : 'part',
+              item_id: vehicle_id || part_id,
+              vehicle_id,
+              part_id,
+              chassis_number,
+              part_number,
+              quantity,
+              unit_price,
+            },
+          ];
+
+    const orderItems: any[] = [];
+    let vehicleInfo: any = null;
+    let partInfo: any = null;
+
+    for (const incomingItem of incomingItems) {
+      const itemType = incomingItem.item_type;
+
+      if (!itemType || !['vehicle', 'part'].includes(itemType)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Each item must have item_type vehicle or part',
+        });
+      }
+
+      if (itemType === 'vehicle') {
+        let vehicleId =
+          incomingItem.vehicle_id ||
+          incomingItem.item_id ||
+          vehicle_id ||
+          null;
+
+        if (!vehicleId && (incomingItem.chassis_number || chassis_number)) {
+          const { data: vehicleByChassis, error: chassisError } =
+            await supabase
+              .from('vehicles')
+              .select('id')
+              .eq(
+                'chassis_number',
+                incomingItem.chassis_number || chassis_number
+              )
+              .single();
+
+          if (chassisError || !vehicleByChassis) {
+            return res.status(404).json({
+              success: false,
+              error: 'Vehicle not found for provided chassis number',
+              details: chassisError?.message || null,
+            });
+          }
+
+          vehicleId = vehicleByChassis.id;
+        }
+
+        if (!vehicleId) {
+          return res.status(400).json({
+            success: false,
+            error: 'vehicle_id is required for vehicle sales',
+          });
+        }
+
+        const { data: vehicle, error: vehicleError } = await supabase
+          .from('vehicles')
+          .select('id, model, unit_price, status, chassis_number, specifications')
+          .eq('id', vehicleId)
+          .single();
+
+        if (vehicleError || !vehicle) {
+          return res.status(404).json({
+            success: false,
+            error: `Vehicle with ID ${vehicleId} not found`,
+            details: vehicleError?.message || null,
+          });
+        }
+
+        if (vehicle.status !== 'available') {
+          return res.status(400).json({
+            success: false,
+            error: `Vehicle is not available. Current status: ${vehicle.status}`,
+          });
+        }
+
+        const price = Number(
+          incomingItem.unit_price || unit_price || vehicle.unit_price
+        );
+
+        orderItems.push({
+          item_type: 'vehicle',
+          vehicle_id: vehicle.id,
+          part_id: null,
+          quantity: 1,
+          unit_price: price,
+          subtotal: price,
+        });
+
+        vehicleInfo = vehicle;
+      }
+
+      if (itemType === 'part') {
+        let partId =
+          incomingItem.part_id || incomingItem.item_id || part_id || null;
+
+        if (!partId && (incomingItem.part_number || part_number)) {
+          const { data: partByNumber, error: partNumberError } = await supabase
+            .from('parts')
+            .select('id')
+            .eq('part_number', incomingItem.part_number || part_number)
+            .single();
+
+          if (partNumberError || !partByNumber) {
+            return res.status(404).json({
+              success: false,
+              error: 'Part not found for provided part number',
+              details: partNumberError?.message || null,
+            });
+          }
+
+          partId = partByNumber.id;
+        }
+
+        if (!partId) {
+          return res.status(400).json({
+            success: false,
+            error: 'part_id is required for part sales',
+          });
+        }
+
+        const { data: part, error: partError } = await supabase
+          .from('parts')
+          .select(
+            'id, part_number, name, unit_price, quantity, reserved_quantity, specifications'
+          )
+          .eq('id', partId)
+          .single();
+
+        if (partError || !part) {
+          return res.status(404).json({
+            success: false,
+            error: `Part with ID ${partId} not found`,
+            details: partError?.message || null,
+          });
+        }
+
+        const qty = Number(incomingItem.quantity || quantity || 1);
+        const availableQty =
+          Number(part.quantity || 0) - Number(part.reserved_quantity || 0);
+
+        if (availableQty < qty) {
+          return res.status(400).json({
+            success: false,
+            error: `Insufficient stock for part ${part.name}. Available: ${availableQty}, Requested: ${qty}`,
+          });
+        }
+
+        const price = Number(
+          incomingItem.unit_price || unit_price || part.unit_price
+        );
+
+        orderItems.push({
+          item_type: 'part',
+          vehicle_id: null,
+          part_id: part.id,
+          quantity: qty,
+          unit_price: price,
+          subtotal: price * qty,
+        });
+
+        partInfo = part;
+      }
+    }
+
+    if (orderItems.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'At least one valid item is required',
       });
     }
 
@@ -664,55 +792,122 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       });
     }
 
-    const initialStatus = paymentAmount >= totalAmount ? 'pending_admin' : 'pending';
+    const initialStatus =
+      paymentAmount >= totalAmount ? 'pending_admin' : 'pending';
 
-    const { data: order, error: orderError } = await supabase
-      .from('sales_orders')
-      .insert([
-        {
-          customer_id: customerId,
-          total_amount: totalAmount,
-          notes: notes || null,
-          status: initialStatus,
-        },
-      ])
-      .select()
-      .single();
+    let order: any = null;
+    let orderError: any = null;
 
-    if (orderError) throw orderError;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const orderNumber = await generateUniqueOrderNumber();
+
+      const result = await supabase
+        .from('sales_orders')
+        .insert([
+          {
+            order_number: orderNumber,
+            customer_id,
+            total_amount: totalAmount,
+            notes: notes || null,
+            status: initialStatus,
+            performed_by: performedBy,
+            performed_by_name: performedByName,
+            confirmed_by: null,
+            confirmed_by_name: null,
+          },
+        ])
+        .select()
+        .single();
+
+      order = result.data;
+      orderError = result.error;
+
+      if (!orderError && order) break;
+      if (orderError?.code !== '23505') break;
+    }
+
+    if (orderError || !order) {
+      return res.status(500).json({
+        success: false,
+        error: orderError?.message || 'Failed to create sales order',
+        details: orderError?.details || null,
+        code: orderError?.code || null,
+        hint: orderError?.hint || null,
+      });
+    }
 
     const orderItemsWithOrderId = orderItems.map((item) => ({
-      ...item,
       sales_order_id: order.id,
+      item_type: item.item_type,
+      vehicle_id: item.vehicle_id,
+      part_id: item.part_id,
+      quantity: item.quantity,
+      unit_price: item.unit_price,
+      subtotal: item.subtotal,
     }));
 
     const { error: itemsError } = await supabase
       .from('sales_order_items')
       .insert(orderItemsWithOrderId);
 
-    if (itemsError) throw itemsError;
+    if (itemsError) {
+      await supabase.from('sales_orders').delete().eq('id', order.id);
+
+      return res.status(500).json({
+        success: false,
+        error: itemsError.message || 'Failed to create sales order items',
+        details: itemsError.details || null,
+        code: itemsError.code || null,
+        hint: itemsError.hint || null,
+      });
+    }
 
     const { error: paymentError } = await supabase.from('payments').insert([
       {
         sales_order_id: order.id,
-        payment_method: payment_method || 'bank_deposit',
-        bank_name: bank_name || null,
-        reference_number: reference_number || null,
+        payment_method: payment_method || 'cash',
+        bank_name: payment_method === 'cash' ? null : bank_name || null,
+        reference_number:
+          payment_method === 'cash' ? null : reference_number || null,
         amount: paymentAmount,
         status: 'pending',
+        performed_by: performedBy,
+        performed_by_name: performedByName,
+        confirmed_by: null,
+        confirmed_by_name: null,
         notes: null,
       },
     ]);
 
-    if (paymentError) throw paymentError;
+    if (paymentError) {
+      await supabase
+        .from('sales_order_items')
+        .delete()
+        .eq('sales_order_id', order.id);
 
-    await reserveOrderItems(order.id, null);
+      await supabase.from('sales_orders').delete().eq('id', order.id);
 
-    await supabase.from('order_history').insert([
+      return res.status(500).json({
+        success: false,
+        error: paymentError.message || 'Failed to create payment record',
+        details: paymentError.details || null,
+        code: paymentError.code || null,
+        hint: paymentError.hint || null,
+      });
+    }
+
+    await reserveOrderItems(order.id, performedBy, performedByName, customer_id);
+
+    const { error: historyError } = await supabase.from('order_history').insert([
       {
         sales_order_id: order.id,
         action: 'created',
+        old_status: null,
         new_status: initialStatus,
+        performed_by: performedBy,
+        performed_by_name: performedByName,
+        confirmed_by: null,
+        confirmed_by_name: null,
         notes:
           initialStatus === 'pending_admin'
             ? 'Order created with full submitted payment, waiting for admin approval'
@@ -720,15 +915,19 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       },
     ]);
 
+    if (historyError) {
+      console.error('Order history insert failed:', historyError);
+    }
+
     const responseData: any = {
       id: order.id,
       order_number: order.order_number,
       customer_name: customer.full_name,
       reference_number: reference_number || null,
-      quantity: quantity || orderItems[0]?.quantity || 1,
-      unit_price: unit_price || orderItems[0]?.unit_price || totalAmount,
+      quantity: orderItems[0]?.quantity || 1,
+      unit_price: orderItems[0]?.unit_price || totalAmount,
       total_amount: totalAmount,
-      deposit_bank: bank_name,
+      deposit_bank: bank_name || null,
       deposit_amount: paymentAmount,
       submitted_amount: paymentAmount,
       remaining_amount: Math.max(0, totalAmount - paymentAmount),
@@ -736,6 +935,10 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       notes: notes || null,
       created_at: order.created_at,
       status: initialStatus,
+      performed_by: performedBy,
+      performed_by_name: performedByName,
+      confirmed_by: null,
+      confirmed_by_name: null,
       is_fully_submitted: paymentAmount >= totalAmount,
     };
 
@@ -751,36 +954,695 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       responseData.specifications = partInfo.specifications;
     }
 
-    res.json({
+    return res.json({
       success: true,
       data: responseData,
       message:
         initialStatus === 'pending_admin'
-          ? `Sales order ${order.order_number} fully paid and sent for admin approval.`
-          : `Sales order ${order.order_number} partially paid and reserved. Remaining: ${
+          ? `Sales order ${responseData.order_number} fully paid and sent for admin approval.`
+          : `Sales order ${responseData.order_number} partially paid and reserved. Remaining: ${
               totalAmount - paymentAmount
             }`,
     });
-  } catch (error) {
-    console.error('Error creating sales order:', error);
-    res.status(500).json({
+  } catch (error: any) {
+    console.error('Error creating sales order:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
       success: false,
-      error: 'Failed to create sales order',
+      error: error.message || 'Failed to create sales order',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
+    });
+  }
+};
+
+// ============================================
+// UPDATE SALE REQUEST BEFORE ADMIN APPROVAL
+// Worker can edit request while status is pending/pending_admin.
+// ============================================
+
+export const updateSaleRequest = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const actor = getActor(req, 'Worker');
+
+    const {
+      customer_id,
+      notes,
+      quantity,
+      unit_price,
+      item_type,
+      vehicle_id,
+      part_id,
+      item_id,
+      chassis_number,
+      part_number,
+      payment_method,
+      bank_name,
+      reference_number,
+      deposit_amount,
+    } = req.body;
+
+    if (actor.role && !['worker', 'store_manager'].includes(actor.role)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Only workers or store managers can edit sale requests',
+      });
+    }
+
+    const { data: order, error: orderError } = await supabase
+      .from('sales_orders')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (orderError) throw orderError;
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        error: 'Sales order not found',
+      });
+    }
+
+    if (!['pending', 'pending_admin'].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'This request can no longer be edited because it has already been approved, cancelled, or completed.',
+      });
+    }
+
+    if (
+      actor.role === 'worker' &&
+      order.performed_by &&
+      actor.id &&
+      order.performed_by !== actor.id
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'Workers can only edit their own sale requests',
+      });
+    }
+
+    const { data: existingItem, error: itemError } = await supabase
+      .from('sales_order_items')
+      .select('*')
+      .eq('sales_order_id', id)
+      .limit(1)
+      .single();
+
+    if (itemError) throw itemError;
+
+    if (!existingItem) {
+      return res.status(404).json({
+        success: false,
+        error: 'Sales order item not found',
+      });
+    }
+
+    const oldStatus = order.status;
+    const oldItemType = existingItem.item_type;
+    const oldVehicleId = existingItem.vehicle_id;
+    const oldPartId = existingItem.part_id;
+    const oldQuantity = Number(existingItem.quantity || 1);
+
+    let newItemType = item_type || oldItemType;
+    let newVehicleId = oldVehicleId;
+    let newPartId = oldPartId;
+
+    if (vehicle_id || chassis_number) {
+      newItemType = 'vehicle';
+    }
+
+    if (part_id || part_number) {
+      newItemType = 'part';
+    }
+
+    if (!['vehicle', 'part'].includes(newItemType)) {
+      return res.status(400).json({
+        success: false,
+        error: 'item_type must be vehicle or part',
+      });
+    }
+
+    let vehicleInfo: any = null;
+    let partInfo: any = null;
+
+    if (newItemType === 'vehicle') {
+      newPartId = null;
+
+      if (vehicle_id || item_id) {
+        newVehicleId = vehicle_id || item_id;
+      }
+
+      if (!newVehicleId && chassis_number) {
+        const { data: vehicleByChassis, error: chassisError } = await supabase
+          .from('vehicles')
+          .select('id')
+          .eq('chassis_number', chassis_number)
+          .single();
+
+        if (chassisError || !vehicleByChassis) {
+          return res.status(404).json({
+            success: false,
+            error: 'Vehicle not found for provided chassis number',
+            details: chassisError?.message || null,
+          });
+        }
+
+        newVehicleId = vehicleByChassis.id;
+      }
+
+      if (!newVehicleId) {
+        return res.status(400).json({
+          success: false,
+          error: 'vehicle_id is required for vehicle request',
+        });
+      }
+
+      const { data: vehicle, error: vehicleError } = await supabase
+        .from('vehicles')
+        .select('id, model, status, unit_price, chassis_number, specifications')
+        .eq('id', newVehicleId)
+        .single();
+
+      if (vehicleError || !vehicle) {
+        return res.status(404).json({
+          success: false,
+          error: 'Selected vehicle not found',
+          details: vehicleError?.message || null,
+        });
+      }
+
+      const isSameVehicle =
+        oldItemType === 'vehicle' && oldVehicleId === newVehicleId;
+
+      if (!isSameVehicle && vehicle.status !== 'available') {
+        return res.status(400).json({
+          success: false,
+          error: `Vehicle is not available. Current status: ${vehicle.status}`,
+        });
+      }
+
+      vehicleInfo = vehicle;
+    }
+
+    if (newItemType === 'part') {
+      newVehicleId = null;
+
+      if (part_id || item_id) {
+        newPartId = part_id || item_id;
+      }
+
+      if (!newPartId && part_number) {
+        const { data: partByNumber, error: partNumberError } = await supabase
+          .from('parts')
+          .select('id')
+          .eq('part_number', part_number)
+          .single();
+
+        if (partNumberError || !partByNumber) {
+          return res.status(404).json({
+            success: false,
+            error: 'Part not found for provided part number',
+            details: partNumberError?.message || null,
+          });
+        }
+
+        newPartId = partByNumber.id;
+      }
+
+      if (!newPartId) {
+        return res.status(400).json({
+          success: false,
+          error: 'part_id is required for part request',
+        });
+      }
+
+      const { data: part, error: partError } = await supabase
+        .from('parts')
+        .select(
+          'id, part_number, name, unit_price, quantity, reserved_quantity, specifications'
+        )
+        .eq('id', newPartId)
+        .single();
+
+      if (partError || !part) {
+        return res.status(404).json({
+          success: false,
+          error: 'Selected part not found',
+          details: partError?.message || null,
+        });
+      }
+
+      partInfo = part;
+    }
+
+    const newQuantity =
+      newItemType === 'vehicle'
+        ? 1
+        : quantity !== undefined
+        ? Number(quantity)
+        : oldQuantity;
+
+    if (!newQuantity || newQuantity <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Quantity must be greater than 0',
+      });
+    }
+
+    const defaultPrice =
+      newItemType === 'vehicle'
+        ? Number(vehicleInfo?.unit_price || existingItem.unit_price)
+        : Number(partInfo?.unit_price || existingItem.unit_price);
+
+    const newUnitPrice =
+      unit_price !== undefined ? Number(unit_price) : defaultPrice;
+
+    if (!newUnitPrice || newUnitPrice <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Unit price must be greater than 0',
+      });
+    }
+
+    const newTotalAmount = newQuantity * newUnitPrice;
+
+    const { data: payments, error: paymentsError } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('sales_order_id', id)
+      .order('created_at', { ascending: false });
+
+    if (paymentsError) throw paymentsError;
+
+    const latestPendingPayment =
+      payments?.find((payment) => payment.status === 'pending') || null;
+
+    const currentSubmittedTotal =
+      payments
+        ?.filter((payment) =>
+          ['pending', 'confirmed'].includes(payment.status)
+        )
+        .reduce((sum, payment) => sum + Number(payment.amount || 0), 0) || 0;
+
+    let proposedSubmittedTotal = currentSubmittedTotal;
+
+    if (deposit_amount !== undefined) {
+      const proposedDepositAmount = Number(deposit_amount || 0);
+
+      if (!proposedDepositAmount || proposedDepositAmount <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Payment amount must be greater than 0',
+        });
+      }
+
+      proposedSubmittedTotal =
+        currentSubmittedTotal -
+        Number(latestPendingPayment?.amount || 0) +
+        proposedDepositAmount;
+    }
+
+    if (proposedSubmittedTotal > newTotalAmount) {
+      return res.status(400).json({
+        success: false,
+        error: 'Submitted payment cannot be greater than total amount',
+      });
+    }
+
+    const finalPaymentMethod =
+      payment_method || latestPendingPayment?.payment_method || 'cash';
+
+    if (
+      finalPaymentMethod !== 'cash' &&
+      (payment_method !== undefined ||
+        bank_name !== undefined ||
+        reference_number !== undefined ||
+        deposit_amount !== undefined)
+    ) {
+      const finalBankName =
+        bank_name !== undefined ? bank_name : latestPendingPayment?.bank_name;
+
+      if (!finalBankName) {
+        return res.status(400).json({
+          success: false,
+          error: 'Bank name is required for non-cash payments',
+        });
+      }
+    }
+
+    const isSameVehicle =
+      oldItemType === 'vehicle' &&
+      newItemType === 'vehicle' &&
+      oldVehicleId === newVehicleId;
+
+    const isSamePart =
+      oldItemType === 'part' &&
+      newItemType === 'part' &&
+      oldPartId === newPartId;
+
+    if (newItemType === 'part' && partInfo) {
+      const totalStock = Number(partInfo.quantity || 0);
+      const reservedStock = Number(partInfo.reserved_quantity || 0);
+
+      const availableForThisRequest = isSamePart
+        ? totalStock - reservedStock + oldQuantity
+        : totalStock - reservedStock;
+
+      if (newQuantity > availableForThisRequest) {
+        return res.status(400).json({
+          success: false,
+          error: `Insufficient stock. Available: ${availableForThisRequest}, Requested: ${newQuantity}`,
+        });
+      }
+    }
+
+    if (!isSameVehicle && oldItemType === 'vehicle' && oldVehicleId) {
+      await supabase
+        .from('vehicles')
+        .update({ status: 'available' })
+        .eq('id', oldVehicleId);
+
+      await supabase.from('vehicle_history').insert({
+        vehicle_id: oldVehicleId,
+        event_type: 'returned',
+        sales_order_id: id,
+        performed_by: actor.id,
+        performed_by_name: actor.name,
+        notes: 'Worker edited request and released previous vehicle reservation',
+      });
+    }
+
+    if (!isSamePart && oldItemType === 'part' && oldPartId) {
+      const { data: oldPart, error: oldPartError } = await supabase
+        .from('parts')
+        .select('reserved_quantity')
+        .eq('id', oldPartId)
+        .single();
+
+      if (oldPartError) throw oldPartError;
+
+      const newOldReserved = Math.max(
+        0,
+        Number(oldPart.reserved_quantity || 0) - oldQuantity
+      );
+
+      const { error: releaseOldPartError } = await supabase
+        .from('parts')
+        .update({ reserved_quantity: newOldReserved })
+        .eq('id', oldPartId);
+
+      if (releaseOldPartError) throw releaseOldPartError;
+
+      await supabase.from('part_transactions').insert({
+        part_id: oldPartId,
+        transaction_type: 'returned',
+        quantity_change: -oldQuantity,
+        quantity_after: newOldReserved,
+        sales_order_id: id,
+        performed_by: actor.id,
+        performed_by_name: actor.name,
+        notes: 'Worker edited request and released previous part reservation',
+      });
+    }
+
+    if (!isSameVehicle && newItemType === 'vehicle' && newVehicleId) {
+      const { error: reserveVehicleError } = await supabase
+        .from('vehicles')
+        .update({ status: 'reserved' })
+        .eq('id', newVehicleId);
+
+      if (reserveVehicleError) throw reserveVehicleError;
+
+      await supabase.from('vehicle_history').insert({
+        vehicle_id: newVehicleId,
+        event_type: 'reserved',
+        customer_id: customer_id || order.customer_id,
+        sales_order_id: id,
+        performed_by: actor.id,
+        performed_by_name: actor.name,
+        notes: 'Worker edited request and reserved new vehicle',
+      });
+    }
+
+    if (newItemType === 'part' && newPartId) {
+      const { data: currentPart, error: currentPartError } = await supabase
+        .from('parts')
+        .select('reserved_quantity')
+        .eq('id', newPartId)
+        .single();
+
+      if (currentPartError) throw currentPartError;
+
+      let newReservedQuantity = Number(currentPart.reserved_quantity || 0);
+
+      if (isSamePart) {
+        newReservedQuantity =
+          newReservedQuantity + (newQuantity - oldQuantity);
+      } else {
+        newReservedQuantity = newReservedQuantity + newQuantity;
+      }
+
+      newReservedQuantity = Math.max(0, newReservedQuantity);
+
+      const { error: reservePartError } = await supabase
+        .from('parts')
+        .update({ reserved_quantity: newReservedQuantity })
+        .eq('id', newPartId);
+
+      if (reservePartError) throw reservePartError;
+
+      if (isSamePart) {
+        const { data: existingReservedTransaction } = await supabase
+          .from('part_transactions')
+          .select('id')
+          .eq('part_id', newPartId)
+          .eq('sales_order_id', id)
+          .eq('transaction_type', 'reserved')
+          .maybeSingle();
+
+        if (existingReservedTransaction) {
+          await supabase
+            .from('part_transactions')
+            .update({
+              quantity_change: newQuantity,
+              quantity_after: newReservedQuantity,
+              performed_by: actor.id,
+              performed_by_name: actor.name,
+              notes: `Worker edited request quantity from ${oldQuantity} to ${newQuantity}`,
+            })
+            .eq('id', existingReservedTransaction.id);
+        } else {
+          await supabase.from('part_transactions').insert({
+            part_id: newPartId,
+            transaction_type: 'reserved',
+            quantity_change: newQuantity,
+            quantity_after: newReservedQuantity,
+            sales_order_id: id,
+            performed_by: actor.id,
+            performed_by_name: actor.name,
+            notes: 'Worker edited request and reserved part quantity',
+          });
+        }
+      } else {
+        await supabase.from('part_transactions').insert({
+          part_id: newPartId,
+          transaction_type: 'reserved',
+          quantity_change: newQuantity,
+          quantity_after: newReservedQuantity,
+          sales_order_id: id,
+          performed_by: actor.id,
+          performed_by_name: actor.name,
+          notes: 'Worker edited request and reserved new part',
+        });
+      }
+    }
+
+    const { error: updateItemError } = await supabase
+      .from('sales_order_items')
+      .update({
+        item_type: newItemType,
+        vehicle_id: newItemType === 'vehicle' ? newVehicleId : null,
+        part_id: newItemType === 'part' ? newPartId : null,
+        quantity: newQuantity,
+        unit_price: newUnitPrice,
+        subtotal: newTotalAmount,
+      })
+      .eq('id', existingItem.id);
+
+    if (updateItemError) throw updateItemError;
+
+    if (
+      payment_method !== undefined ||
+      bank_name !== undefined ||
+      reference_number !== undefined ||
+      deposit_amount !== undefined
+    ) {
+      if (!latestPendingPayment) {
+        if (deposit_amount === undefined) {
+          return res.status(400).json({
+            success: false,
+            error: 'No pending payment found to update',
+          });
+        }
+
+        const { error: insertPaymentError } = await supabase
+          .from('payments')
+          .insert({
+            sales_order_id: id,
+            payment_method: finalPaymentMethod,
+            bank_name:
+              finalPaymentMethod === 'cash' ? null : bank_name || null,
+            reference_number:
+              finalPaymentMethod === 'cash' ? null : reference_number || null,
+            amount: Number(deposit_amount),
+            status: 'pending',
+            performed_by: actor.id,
+            performed_by_name: actor.name,
+          });
+
+        if (insertPaymentError) throw insertPaymentError;
+      } else {
+        const paymentUpdates: any = {
+          performed_by: latestPendingPayment.performed_by || actor.id,
+          performed_by_name: latestPendingPayment.performed_by_name || actor.name,
+        };
+
+        if (payment_method !== undefined) {
+          paymentUpdates.payment_method = finalPaymentMethod;
+        }
+
+        if (bank_name !== undefined || payment_method !== undefined) {
+          paymentUpdates.bank_name =
+            finalPaymentMethod === 'cash'
+              ? null
+              : bank_name !== undefined
+              ? bank_name || null
+              : latestPendingPayment.bank_name || null;
+        }
+
+        if (reference_number !== undefined || payment_method !== undefined) {
+          paymentUpdates.reference_number =
+            finalPaymentMethod === 'cash'
+              ? null
+              : reference_number !== undefined
+              ? reference_number || null
+              : latestPendingPayment.reference_number || null;
+        }
+
+        if (deposit_amount !== undefined) {
+          paymentUpdates.amount = Number(deposit_amount);
+        }
+
+        const { error: updatePaymentError } = await supabase
+          .from('payments')
+          .update(paymentUpdates)
+          .eq('id', latestPendingPayment.id);
+
+        if (updatePaymentError) throw updatePaymentError;
+      }
+    }
+
+    const submittedAfterEdit = await getSubmittedPaymentTotal(id);
+    const newStatus =
+      submittedAfterEdit >= newTotalAmount ? 'pending_admin' : 'pending';
+
+    const orderUpdates: any = {
+      total_amount: newTotalAmount,
+      status: newStatus,
+      performed_by: order.performed_by || actor.id,
+      performed_by_name: order.performed_by_name || actor.name,
+    };
+
+    if (customer_id !== undefined) orderUpdates.customer_id = customer_id;
+    if (notes !== undefined) orderUpdates.notes = notes || null;
+
+    const { data: updatedOrder, error: updateOrderError } = await supabase
+      .from('sales_orders')
+      .update(orderUpdates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateOrderError) throw updateOrderError;
+
+    await supabase.from('order_history').insert({
+      sales_order_id: id,
+      action: 'request_edited',
+      old_status: oldStatus,
+      new_status: newStatus,
+      performed_by: actor.id,
+      performed_by_name: actor.name,
+      notes: 'Worker edited sale request before admin approval',
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        ...updatedOrder,
+        submitted_amount: submittedAfterEdit,
+        remaining_amount: Math.max(0, newTotalAmount - submittedAfterEdit),
+      },
+      message: 'Sale request updated successfully',
+    });
+  } catch (error: any) {
+    console.error('Error updating sale request:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update sale request',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
 
 // ============================================
 // UPDATE ORDER STATUS
-// Admin confirms pending_admin order.
-// Confirmed means inventory is sold/deducted.
 // ============================================
+
 export const updateOrderStatus = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { status, confirmed_by } = req.body;
+    const {
+      status,
+      confirmed_by,
+      confirmed_by_name,
+      performed_by,
+      performed_by_name,
+    } = req.body;
 
-    const validStatuses = ['pending', 'pending_admin', 'confirmed', 'completed', 'cancelled'];
+    const confirmedBy = cleanNullable(confirmed_by);
+    const confirmedByName = cleanNullable(confirmed_by_name);
+
+    const fallbackPerformedBy = cleanNullable(performed_by);
+    const fallbackPerformedByName = cleanNullable(performed_by_name);
+
+    const validStatuses = [
+      'draft',
+      'pending',
+      'pending_admin',
+      'confirmed',
+      'completed',
+      'cancelled',
+    ];
 
     if (!status || !validStatuses.includes(status)) {
       return res.status(400).json({
@@ -817,7 +1679,8 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
 
     if (status === 'confirmed') {
       updateData.confirmed_at = new Date().toISOString();
-      updateData.confirmed_by = confirmed_by || null;
+      updateData.confirmed_by = confirmedBy;
+      updateData.confirmed_by_name = confirmedByName;
 
       const { data: items, error: itemsError } = await supabase
         .from('sales_order_items')
@@ -828,18 +1691,67 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
 
       for (const item of items || []) {
         if (item.item_type === 'vehicle') {
-          await supabase
+          const { error: vehicleUpdateError } = await supabase
             .from('vehicles')
             .update({ status: 'sold' })
             .eq('id', item.vehicle_id);
 
-          await supabase.from('vehicle_history').insert({
-            vehicle_id: item.vehicle_id,
-            event_type: 'sold',
-            sales_order_id: id,
-            performed_by: confirmed_by || null,
-            notes: 'Sale confirmed by admin',
-          });
+          if (vehicleUpdateError) throw vehicleUpdateError;
+
+          const { data: existingReservedHistory, error: reservedHistoryError } =
+            await supabase
+              .from('vehicle_history')
+              .select('id')
+              .eq('vehicle_id', item.vehicle_id)
+              .eq('sales_order_id', id)
+              .eq('event_type', 'reserved')
+              .maybeSingle();
+
+          if (reservedHistoryError) throw reservedHistoryError;
+
+          if (existingReservedHistory) {
+            const { error: updateHistoryError } = await supabase
+              .from('vehicle_history')
+              .update({
+                event_type: 'sold',
+                confirmed_by: confirmedBy,
+                confirmed_by_name: confirmedByName,
+                notes: 'Sale confirmed by admin',
+              })
+              .eq('id', existingReservedHistory.id);
+
+            if (updateHistoryError) throw updateHistoryError;
+          } else {
+            const { data: existingSoldHistory, error: existingSoldHistoryError } =
+              await supabase
+                .from('vehicle_history')
+                .select('id')
+                .eq('vehicle_id', item.vehicle_id)
+                .eq('sales_order_id', id)
+                .eq('event_type', 'sold')
+                .maybeSingle();
+
+            if (existingSoldHistoryError) throw existingSoldHistoryError;
+
+            if (!existingSoldHistory) {
+              const { error: insertHistoryError } = await supabase
+                .from('vehicle_history')
+                .insert({
+                  vehicle_id: item.vehicle_id,
+                  event_type: 'sold',
+                  customer_id: order.customer_id || null,
+                  sales_order_id: id,
+                  performed_by: order.performed_by || fallbackPerformedBy,
+                  performed_by_name:
+                    order.performed_by_name || fallbackPerformedByName,
+                  confirmed_by: confirmedBy,
+                  confirmed_by_name: confirmedByName,
+                  notes: 'Sale confirmed by admin',
+                });
+
+              if (insertHistoryError) throw insertHistoryError;
+            }
+          }
         }
 
         if (item.item_type === 'part') {
@@ -851,38 +1763,94 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
 
           if (partError) throw partError;
 
-          if (part) {
-            const soldQty = Number(item.quantity || 0);
-            const newQuantity = Math.max(0, Number(part.quantity || 0) - soldQty);
-            const newReserved = Math.max(
-              0,
-              Number(part.reserved_quantity || 0) - soldQty
-            );
+          const soldQty = Number(item.quantity || 0);
+          const newQuantity = Math.max(0, Number(part.quantity || 0) - soldQty);
+          const newReserved = Math.max(
+            0,
+            Number(part.reserved_quantity || 0) - soldQty
+          );
 
-            await supabase
-              .from('parts')
+          const { error: partUpdateError } = await supabase
+            .from('parts')
+            .update({
+              quantity: newQuantity,
+              reserved_quantity: newReserved,
+            })
+            .eq('id', item.part_id);
+
+          if (partUpdateError) throw partUpdateError;
+
+          const {
+            data: existingReservedTransaction,
+            error: reservedTransactionError,
+          } = await supabase
+            .from('part_transactions')
+            .select('id')
+            .eq('part_id', item.part_id)
+            .eq('sales_order_id', id)
+            .eq('transaction_type', 'reserved')
+            .maybeSingle();
+
+          if (reservedTransactionError) throw reservedTransactionError;
+
+          if (existingReservedTransaction) {
+            const { error: updateTransactionError } = await supabase
+              .from('part_transactions')
               .update({
-                quantity: newQuantity,
-                reserved_quantity: newReserved,
+                transaction_type: 'sold',
+                quantity_change: -soldQty,
+                quantity_after: newQuantity,
+                confirmed_by: confirmedBy,
+                confirmed_by_name: confirmedByName,
+                notes: 'Sale confirmed by admin',
               })
-              .eq('id', item.part_id);
+              .eq('id', existingReservedTransaction.id);
 
-            await supabase.from('part_transactions').insert({
-              part_id: item.part_id,
-              transaction_type: 'sold',
-              quantity_change: -soldQty,
-              quantity_after: newQuantity,
-              sales_order_id: id,
-              performed_by: confirmed_by || null,
-              notes: 'Sale confirmed by admin',
-            });
+            if (updateTransactionError) throw updateTransactionError;
+          } else {
+            const {
+              data: existingSoldTransaction,
+              error: existingSoldTransactionError,
+            } = await supabase
+              .from('part_transactions')
+              .select('id')
+              .eq('part_id', item.part_id)
+              .eq('sales_order_id', id)
+              .eq('transaction_type', 'sold')
+              .maybeSingle();
+
+            if (existingSoldTransactionError) throw existingSoldTransactionError;
+
+            if (!existingSoldTransaction) {
+              const { error: insertTransactionError } = await supabase
+                .from('part_transactions')
+                .insert({
+                  part_id: item.part_id,
+                  transaction_type: 'sold',
+                  quantity_change: -soldQty,
+                  quantity_after: newQuantity,
+                  sales_order_id: id,
+                  performed_by: order.performed_by || fallbackPerformedBy,
+                  performed_by_name:
+                    order.performed_by_name || fallbackPerformedByName,
+                  confirmed_by: confirmedBy,
+                  confirmed_by_name: confirmedByName,
+                  notes: 'Sale confirmed by admin',
+                });
+
+              if (insertTransactionError) throw insertTransactionError;
+            }
           }
         }
       }
     }
 
     if (status === 'cancelled' && oldStatus !== 'cancelled') {
-      await releaseReservedItems(id, confirmed_by || null);
+      await releaseReservedItems(
+        id,
+        fallbackPerformedBy || confirmedBy || null,
+        fallbackPerformedByName || confirmedByName || null
+      );
     }
 
     const { data, error } = await supabase
@@ -900,31 +1868,50 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
         action: 'status_changed',
         old_status: oldStatus,
         new_status: status,
-        performed_by: confirmed_by || null,
+        performed_by: order.performed_by || fallbackPerformedBy || null,
+        performed_by_name:
+          order.performed_by_name || fallbackPerformedByName || null,
+        confirmed_by: status === 'confirmed' ? confirmedBy : null,
+        confirmed_by_name: status === 'confirmed' ? confirmedByName : null,
         notes: `Status changed from ${oldStatus} to ${status}`,
       },
     ]);
 
-    res.json({
+    return res.json({
       success: true,
       data,
       message: `Order status updated to ${status} successfully`,
     });
-  } catch (error) {
-    console.error('Error updating order status:', error);
-    res.status(500).json({
+  } catch (error: any) {
+    console.error('Error updating order status:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+      stack: error.stack,
+    });
+
+    return res.status(500).json({
       success: false,
-      error: 'Failed to update order status',
+      error: error.message || 'Failed to update order status',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
 
-// Kept for compatibility, but frontend no longer needs to call it.
+// Kept for compatibility.
 export const workerConfirmFullPayment = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    const { performed_by, performed_by_name } = req.body || {};
 
-    const newStatus = await updateOrderStatusFromSubmittedPayments(id);
+    const newStatus = await updateOrderStatusFromSubmittedPayments(
+      id,
+      cleanNullable(performed_by),
+      cleanNullable(performed_by_name)
+    );
 
     res.json({
       success: true,
@@ -936,11 +1923,20 @@ export const workerConfirmFullPayment = async (req: Request, res: Response) => {
           ? 'Full payment submitted. Order sent to admin for final approval.'
           : 'Order still has remaining balance.',
     });
-  } catch (error) {
-    console.error('Error confirming full payment:', error);
+  } catch (error: any) {
+    console.error('Error confirming full payment:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
+
     res.status(500).json({
       success: false,
-      error: 'Failed to confirm payment',
+      error: error.message || 'Failed to confirm payment',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
@@ -948,10 +1944,14 @@ export const workerConfirmFullPayment = async (req: Request, res: Response) => {
 // ============================================
 // CANCEL ORDER
 // ============================================
+
 export const cancelOrder = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { performed_by } = req.body || {};
+    const { performed_by, performed_by_name } = req.body || {};
+
+    const performedBy = cleanNullable(performed_by);
+    const performedByName = cleanNullable(performed_by_name);
 
     const { data: order, error: orderError } = await supabase
       .from('sales_orders')
@@ -982,7 +1982,7 @@ export const cancelOrder = async (req: Request, res: Response) => {
       });
     }
 
-    await releaseReservedItems(id, performed_by || null);
+    await releaseReservedItems(id, performedBy, performedByName);
 
     const { data, error } = await supabase
       .from('sales_orders')
@@ -999,7 +1999,8 @@ export const cancelOrder = async (req: Request, res: Response) => {
         action: 'cancelled',
         old_status: order.status,
         new_status: 'cancelled',
-        performed_by: performed_by || null,
+        performed_by: performedBy,
+        performed_by_name: performedByName,
         notes: 'Order cancelled and inventory restored',
       },
     ]);
@@ -1009,11 +2010,20 @@ export const cancelOrder = async (req: Request, res: Response) => {
       data,
       message: 'Order cancelled successfully and inventory restored',
     });
-  } catch (error) {
-    console.error('Error cancelling order:', error);
+  } catch (error: any) {
+    console.error('Error cancelling order:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
+
     res.status(500).json({
       success: false,
-      error: 'Failed to cancel order',
+      error: error.message || 'Failed to cancel order',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
@@ -1021,6 +2031,7 @@ export const cancelOrder = async (req: Request, res: Response) => {
 // ============================================
 // DELETE ORDER
 // ============================================
+
 export const deleteOrder = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -1059,11 +2070,20 @@ export const deleteOrder = async (req: Request, res: Response) => {
       success: true,
       message: 'Order deleted successfully',
     });
-  } catch (error) {
-    console.error('Error deleting order:', error);
+  } catch (error: any) {
+    console.error('Error deleting order:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
+
     res.status(500).json({
       success: false,
-      error: 'Failed to delete order',
+      error: error.message || 'Failed to delete order',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };

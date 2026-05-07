@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { supabase, supabaseAuth, supabaseAdmin } from '../config/supabase';
+import { supabaseAdmin, supabaseAuth } from '../config/supabase';
 import { AuthenticatedRequest, UserRole } from '../middleware/authMiddleware';
 
 const VALID_ROLES: UserRole[] = [
@@ -8,6 +8,25 @@ const VALID_ROLES: UserRole[] = [
   'worker',
   'store_manager',
 ];
+
+const normalizeEmail = (email: string) => String(email).trim().toLowerCase();
+
+const isValidRole = (role: any): role is UserRole => {
+  return VALID_ROLES.includes(role);
+};
+
+const requireSuperAdmin = (req: AuthenticatedRequest, res: Response) => {
+  if (req.user?.role !== 'super_admin') {
+    res.status(403).json({
+      success: false,
+      error: 'Only super admins can manage users',
+    });
+
+    return false;
+  }
+
+  return true;
+};
 
 export const login = async (req: any, res: Response) => {
   try {
@@ -21,7 +40,7 @@ export const login = async (req: any, res: Response) => {
     }
 
     const { data, error } = await supabaseAuth.auth.signInWithPassword({
-      email: String(email).trim().toLowerCase(),
+      email: normalizeEmail(email),
       password,
     });
 
@@ -32,16 +51,17 @@ export const login = async (req: any, res: Response) => {
       });
     }
 
-    const { data: profile, error: profileError } = await supabase
+    const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
-      .select('id, full_name, email, role, is_active')
+      .select('id, full_name, email, role, is_active, created_at, updated_at')
       .eq('id', data.user.id)
       .single();
 
     if (profileError || !profile) {
       return res.status(403).json({
         success: false,
-        error: 'User profile not found',
+        error:
+          'User profile not found. The auth user exists, but public.profiles is missing. Ask the super admin to recreate or repair the profile.',
       });
     }
 
@@ -64,12 +84,20 @@ export const login = async (req: any, res: Response) => {
       },
       message: 'Logged in successfully',
     });
-  } catch (error) {
-    console.error('Login error:', error);
+  } catch (error: any) {
+    console.error('Login error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
 
     return res.status(500).json({
       success: false,
-      error: 'Login failed',
+      error: error.message || 'Login failed',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
@@ -83,6 +111,8 @@ export const getMe = async (req: AuthenticatedRequest, res: Response) => {
 
 export const createUser = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    if (!requireSuperAdmin(req, res)) return;
+
     const { full_name, email, password, role } = req.body;
 
     if (!full_name || !email || !password || !role) {
@@ -92,14 +122,14 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
       });
     }
 
-    if (!VALID_ROLES.includes(role)) {
+    if (!isValidRole(role)) {
       return res.status(400).json({
         success: false,
         error: 'Role must be super_admin, admin, worker, or store_manager',
       });
     }
 
-    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedEmail = normalizeEmail(email);
 
     const { data: createdUser, error: createError } =
       await supabaseAdmin.auth.admin.createUser({
@@ -107,7 +137,10 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
         password,
         email_confirm: true,
         user_metadata: {
-          full_name,
+          full_name: String(full_name).trim(),
+          role,
+        },
+        app_metadata: {
           role,
         },
       });
@@ -116,21 +149,26 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
       return res.status(400).json({
         success: false,
         error: createError?.message || 'Failed to create user',
+        code: createError?.code || null,
       });
     }
 
-    const { data: profile, error: profileError } = await supabase
+    const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
-      .insert([
+      .upsert(
         {
           id: createdUser.user.id,
           full_name: String(full_name).trim(),
           email: normalizedEmail,
           role,
           is_active: true,
+          updated_at: new Date().toISOString(),
         },
-      ])
-      .select('id, full_name, email, role, is_active, created_at')
+        {
+          onConflict: 'id',
+        }
+      )
+      .select('id, full_name, email, role, is_active, created_at, updated_at')
       .single();
 
     if (profileError) {
@@ -139,6 +177,9 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
       return res.status(400).json({
         success: false,
         error: profileError.message,
+        details: profileError.details || null,
+        hint: profileError.hint || null,
+        code: profileError.code || null,
       });
     }
 
@@ -147,19 +188,29 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
       data: profile,
       message: 'User created successfully',
     });
-  } catch (error) {
-    console.error('Create user error:', error);
+  } catch (error: any) {
+    console.error('Create user error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
 
     return res.status(500).json({
       success: false,
-      error: 'Failed to create user',
+      error: error.message || 'Failed to create user',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
 
 export const getUsers = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { data, error } = await supabase
+    if (!requireSuperAdmin(req, res)) return;
+
+    const { data, error } = await supabaseAdmin
       .from('profiles')
       .select('id, full_name, email, role, is_active, created_at, updated_at')
       .order('created_at', { ascending: false });
@@ -171,12 +222,20 @@ export const getUsers = async (req: AuthenticatedRequest, res: Response) => {
       data: data || [],
       message: 'Users fetched successfully',
     });
-  } catch (error) {
-    console.error('Get users error:', error);
+  } catch (error: any) {
+    console.error('Get users error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
 
     return res.status(500).json({
       success: false,
-      error: 'Failed to fetch users',
+      error: error.message || 'Failed to fetch users',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
@@ -186,8 +245,10 @@ export const updateUserStatus = async (
   res: Response
 ) => {
   try {
+    if (!requireSuperAdmin(req, res)) return;
+
     const { id } = req.params;
-    const { is_active } = req.body as unknown as { is_active: boolean };
+    const { is_active } = req.body as { is_active: boolean };
 
     if (typeof is_active !== 'boolean') {
       return res.status(400).json({
@@ -203,7 +264,7 @@ export const updateUserStatus = async (
       });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('profiles')
       .update({
         is_active,
@@ -218,14 +279,24 @@ export const updateUserStatus = async (
     return res.json({
       success: true,
       data,
-      message: is_active ? 'User enabled successfully' : 'User disabled successfully',
+      message: is_active
+        ? 'User enabled successfully'
+        : 'User disabled successfully',
     });
-  } catch (error) {
-    console.error('Update user status error:', error);
+  } catch (error: any) {
+    console.error('Update user status error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
 
     return res.status(500).json({
       success: false,
-      error: 'Failed to update user status',
+      error: error.message || 'Failed to update user status',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
@@ -235,10 +306,12 @@ export const updateUserRole = async (
   res: Response
 ) => {
   try {
+    if (!requireSuperAdmin(req, res)) return;
+
     const { id } = req.params;
     const { role } = req.body;
 
-    if (!VALID_ROLES.includes(role)) {
+    if (!isValidRole(role)) {
       return res.status(400).json({
         success: false,
         error: 'Role must be super_admin, admin, worker, or store_manager',
@@ -252,7 +325,7 @@ export const updateUserRole = async (
       });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('profiles')
       .update({
         role,
@@ -264,17 +337,34 @@ export const updateUserRole = async (
 
     if (error) throw error;
 
+    await supabaseAdmin.auth.admin.updateUserById(id, {
+      app_metadata: {
+        role,
+      },
+      user_metadata: {
+        role,
+      },
+    } as any);
+
     return res.json({
       success: true,
       data,
       message: 'User role updated successfully',
     });
-  } catch (error) {
-    console.error('Update user role error:', error);
+  } catch (error: any) {
+    console.error('Update user role error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
 
     return res.status(500).json({
       success: false,
-      error: 'Failed to update user role',
+      error: error.message || 'Failed to update user role',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };
@@ -284,6 +374,8 @@ export const resetUserPassword = async (
   res: Response
 ) => {
   try {
+    if (!requireSuperAdmin(req, res)) return;
+
     const { id } = req.params;
     const { password } = req.body;
 
@@ -302,6 +394,7 @@ export const resetUserPassword = async (
       return res.status(400).json({
         success: false,
         error: error.message,
+        code: error.code || null,
       });
     }
 
@@ -313,12 +406,20 @@ export const resetUserPassword = async (
       },
       message: 'Password reset successfully',
     });
-  } catch (error) {
-    console.error('Reset password error:', error);
+  } catch (error: any) {
+    console.error('Reset password error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
 
     return res.status(500).json({
       success: false,
-      error: 'Failed to reset password',
+      error: error.message || 'Failed to reset password',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
     });
   }
 };

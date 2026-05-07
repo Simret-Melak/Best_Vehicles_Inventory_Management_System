@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, Response, NextFunction } from 'express';
 import {
   getVehicles,
   createVehicle,
@@ -21,17 +21,34 @@ import {
 import {
   requireAuth,
   requireInventoryReadAccess,
-  requireStockWriteAccess,
-  requireAdminApprovalAccess,
+  AuthenticatedRequest,
 } from '../middleware/authMiddleware';
 
 const router = Router();
+
+const requireInventoryWriteAccess = (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  const allowedRoles = ['worker', 'store_manager'];
+
+  if (!req.user || !allowedRoles.includes(req.user.role)) {
+    return res.status(403).json({
+      success: false,
+      error:
+        'You do not have permission to create, update, delete, or add stock.',
+    });
+  }
+
+  return next();
+};
 
 // ============================================
 // VEHICLE ROUTES
 // ============================================
 
-// Everyone logged in can view inventory:
+// View access:
 // super_admin, admin, worker, store_manager
 router.get('/vehicles', requireAuth, requireInventoryReadAccess, getVehicles);
 
@@ -56,23 +73,28 @@ router.get(
   getVehicleHistory
 );
 
-// Stock write access:
-// super_admin, admin, store_manager
-router.post('/vehicles', requireAuth, requireStockWriteAccess, createVehicle);
+// Write access:
+// worker, store_manager only
+// admin can only view
+// super_admin mainly manages users
+router.post(
+  '/vehicles',
+  requireAuth,
+  requireInventoryWriteAccess,
+  createVehicle
+);
 
 router.put(
   '/vehicles/:id',
   requireAuth,
-  requireStockWriteAccess,
+  requireInventoryWriteAccess,
   updateVehicle
 );
 
-// Delete access:
-// super_admin/admin only
 router.delete(
   '/vehicles/:id',
   requireAuth,
-  requireAdminApprovalAccess,
+  requireInventoryWriteAccess,
   deleteVehicle
 );
 
@@ -80,7 +102,8 @@ router.delete(
 // PART ROUTES
 // ============================================
 
-// Everyone logged in can view inventory:
+// View access:
+// super_admin, admin, worker, store_manager
 router.get('/parts', requireAuth, requireInventoryReadAccess, getParts);
 
 router.get(
@@ -111,25 +134,34 @@ router.get(
   getPartTransactions
 );
 
-// Stock write access:
-// super_admin, admin, store_manager
-router.post('/parts', requireAuth, requireStockWriteAccess, createPart);
+// Write access:
+// worker, store_manager only
+// admin can only view
+router.post(
+  '/parts',
+  requireAuth,
+  requireInventoryWriteAccess,
+  createPart
+);
 
-router.put('/parts/:id', requireAuth, requireStockWriteAccess, updatePart);
+router.put(
+  '/parts/:id',
+  requireAuth,
+  requireInventoryWriteAccess,
+  updatePart
+);
 
 router.post(
   '/parts/:id/add-stock',
   requireAuth,
-  requireStockWriteAccess,
+  requireInventoryWriteAccess,
   addPartStock
 );
 
-// Delete access:
-// super_admin/admin only
 router.delete(
   '/parts/:id',
   requireAuth,
-  requireAdminApprovalAccess,
+  requireInventoryWriteAccess,
   deletePart
 );
 
