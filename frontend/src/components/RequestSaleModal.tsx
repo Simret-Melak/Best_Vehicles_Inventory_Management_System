@@ -365,9 +365,6 @@ export default function RequestSaleModal({
         quantity: selectedQuantity,
         unit_price: toNumber(item.unit_price),
 
-        // Important:
-        // performed_by must be the worker UUID.
-        // performed_by_name is the display name used in history.
         performed_by: workerUserId,
         performed_by_name: workerDisplayName,
 
@@ -581,22 +578,30 @@ export default function RequestSaleModal({
                             </TouchableOpacity>
                           </View>
                         ) : (
-                          <View style={styles.customerList}>
-                            {filteredCustomers.slice(0, 8).map((customer) => (
-                              <TouchableOpacity
-                                key={customer.id}
-                                style={styles.customerOption}
-                                onPress={() => setSelectedCustomer(customer)}
-                              >
-                                <Text style={styles.customerOptionName}>
-                                  {customer.full_name}
-                                </Text>
+                          <View style={styles.customerListWrapper}>
+                            <ScrollView
+                              nestedScrollEnabled
+                              keyboardShouldPersistTaps="handled"
+                              showsVerticalScrollIndicator
+                              style={styles.customerListScroll}
+                              contentContainerStyle={styles.customerListContent}
+                            >
+                              {filteredCustomers.map((customer) => (
+                                <TouchableOpacity
+                                  key={customer.id}
+                                  style={styles.customerOption}
+                                  onPress={() => setSelectedCustomer(customer)}
+                                >
+                                  <Text style={styles.customerOptionName}>
+                                    {customer.full_name}
+                                  </Text>
 
-                                <Text style={styles.customerOptionSub} numberOfLines={1}>
-                                  {customer.phone || 'No phone'} • {customer.email || 'No email'}
-                                </Text>
-                              </TouchableOpacity>
-                            ))}
+                                  <Text style={styles.customerOptionSub} numberOfLines={1}>
+                                    {customer.phone || 'No phone'} • {customer.email || 'No email'}
+                                  </Text>
+                                </TouchableOpacity>
+                              ))}
+                            </ScrollView>
                           </View>
                         )}
                       </>
@@ -731,6 +736,7 @@ export default function RequestSaleModal({
                 </View>
 
                 <Text style={styles.inputLabel}>Payment Method</Text>
+
                 <View style={styles.methodGrid}>
                   {[
                     { value: 'cash', label: 'Cash' },
@@ -781,6 +787,7 @@ export default function RequestSaleModal({
                 ) : null}
 
                 <Text style={styles.inputLabel}>Amount Paid / Submitted *</Text>
+
                 <TextInput
                   style={styles.input}
                   placeholder="Amount paid"
@@ -822,6 +829,7 @@ export default function RequestSaleModal({
                 </View>
 
                 <Text style={styles.inputLabel}>Notes</Text>
+
                 <TextInput
                   style={[styles.input, styles.notesInput]}
                   placeholder="Optional notes"
@@ -1032,8 +1040,20 @@ const styles = StyleSheet.create({
     minHeight: 86,
     textAlignVertical: 'top',
   },
-  customerList: {
+  customerListWrapper: {
+    maxHeight: 260,
     marginBottom: 14,
+    borderRadius: 10,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#334155',
+    backgroundColor: '#0f172a',
+  },
+  customerListScroll: {
+    maxHeight: 260,
+  },
+  customerListContent: {
+    padding: 8,
     gap: 8,
   },
   customerOption: {

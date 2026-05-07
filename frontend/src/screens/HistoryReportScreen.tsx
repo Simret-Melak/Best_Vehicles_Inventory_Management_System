@@ -26,6 +26,7 @@ interface HistoryEntry {
   transaction_type: string;
   quantity_change: number;
   quantity_after: number;
+  available_quantity_after?: number;
 
   performed_by?: string;
   performed_by_name?: string;
@@ -169,24 +170,6 @@ const isCustomerRelatedTransaction = (type: string) => {
   );
 };
 
-const isSaleType = (type: string) => {
-  const normalized = normalizeType(type);
-  return normalized === 'sold' || normalized === 'sale_confirmed';
-};
-
-const isReservedType = (type: string) => {
-  return normalizeType(type) === 'reserved';
-};
-
-const isReturnedType = (type: string) => {
-  return normalizeType(type) === 'returned';
-};
-
-const isStockInType = (type: string) => {
-  const normalized = normalizeType(type);
-  return normalized === 'stock_in' || normalized === 'received';
-};
-
 const getDisplayQuantityChange = (transactionType: string, rawChange: any) => {
   const normalized = normalizeType(transactionType);
   const movedQty = Math.abs(toNumber(rawChange));
@@ -221,56 +204,6 @@ const getVehicleStockAfter = (eventType: string) => {
   if (normalized === 'sold' || normalized === 'sale_confirmed') return 'Sold';
 
   return 'Updated';
-};
-
-const applyPartDisplayStockValues = (entries: HistoryEntry[], part: any) => {
-  const totalStock = toNumber(part?.quantity);
-  const reservedStock = toNumber(part?.reserved_quantity);
-  let runningAvailableStock = Math.max(0, totalStock - reservedStock);
-
-  const newestFirst = [...entries].sort((a, b) => {
-    const dateA = a.created_date ? new Date(a.created_date).getTime() : 0;
-    const dateB = b.created_date ? new Date(b.created_date).getTime() : 0;
-    return dateB - dateA;
-  });
-
-  const calculated = newestFirst.map((entry) => {
-    const transactionType = normalizeType(entry.transaction_type);
-    const movedQty = Math.abs(toNumber(entry.quantity_change));
-    const displayQuantityChange = getDisplayQuantityChange(
-      transactionType,
-      entry.quantity_change
-    );
-
-    const entryWithDisplayValues: HistoryEntry = {
-      ...entry,
-      display_quantity_change: displayQuantityChange,
-      display_stock_after: runningAvailableStock,
-    };
-
-    if (isStockInType(transactionType)) {
-      runningAvailableStock = Math.max(0, runningAvailableStock - movedQty);
-    } else if (isReservedType(transactionType)) {
-      runningAvailableStock += movedQty;
-    } else if (isSaleType(transactionType)) {
-      runningAvailableStock = runningAvailableStock;
-    } else if (isReturnedType(transactionType)) {
-      runningAvailableStock = Math.max(0, runningAvailableStock - movedQty);
-    } else {
-      runningAvailableStock = Math.max(
-        0,
-        runningAvailableStock - displayQuantityChange
-      );
-    }
-
-    return entryWithDisplayValues;
-  });
-
-  return calculated.sort((a, b) => {
-    const dateA = a.created_date ? new Date(a.created_date).getTime() : 0;
-    const dateB = b.created_date ? new Date(b.created_date).getTime() : 0;
-    return dateB - dateA;
-  });
 };
 
 const getCustomerContextLabel = (entry: HistoryEntry) => {
@@ -311,6 +244,10 @@ const getDisplayChange = (entry: HistoryEntry) => {
 };
 
 const getDisplayStockAfter = (entry: HistoryEntry) => {
+  if (entry.item_type === 'part') {
+    return entry.available_quantity_after ?? entry.quantity_after;
+  }
+
   return entry.display_stock_after !== undefined
     ? entry.display_stock_after
     : entry.quantity_after;
@@ -740,6 +677,11 @@ export default function HistoryReportScreen() {
               transaction_type: transactionType,
               quantity_change: toNumber(trans.quantity_change),
               quantity_after: toNumber(trans.quantity_after),
+              available_quantity_after:
+                trans.available_quantity_after !== null &&
+                trans.available_quantity_after !== undefined
+                  ? toNumber(trans.available_quantity_after)
+                  : toNumber(trans.quantity_after),
 
               performed_by: trans.performed_by || undefined,
               performed_by_name:
@@ -757,8 +699,7 @@ export default function HistoryReportScreen() {
           partEntries.push(entry);
         }
 
-        const calculatedPartEntries = applyPartDisplayStockValues(partEntries, part);
-        allTransactions.push(...calculatedPartEntries);
+        allTransactions.push(...partEntries);
       }
 
       allTransactions.sort((a, b) => {
