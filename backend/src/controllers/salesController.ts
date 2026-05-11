@@ -66,60 +66,32 @@ async function generateUniqueOrderNumber() {
 
     if (error) throw error;
 
-    if (!existingOrder) {
-      return candidate;
-    }
+    if (!existingOrder) return candidate;
   }
 
   throw new Error('Failed to generate unique order number');
 }
 
-async function updateOrderStatusFromSubmittedPayments(
-  orderId: string,
-  performedBy: string | null = null,
-  performedByName: string | null = null
-) {
-  const { data: order, error: orderError } = await supabase
-    .from('sales_orders')
-    .select('id, total_amount, status')
-    .eq('id', orderId)
-    .single();
+async function orderHasVehicleItem(orderId: string) {
+  const { data, error } = await supabase
+    .from('sales_order_items')
+    .select('item_type')
+    .eq('sales_order_id', orderId);
 
-  if (orderError) throw orderError;
-  if (!order) return null;
+  if (error) throw error;
 
-  if (TERMINAL_ORDER_STATUSES.includes(order.status)) {
-    return order.status;
-  }
+  return (data || []).some((item) => item.item_type === 'vehicle');
+}
 
-  const submittedTotal = await getSubmittedPaymentTotal(orderId);
-  const orderTotal = Number(order.total_amount || 0);
+async function getOrderItems(orderId: string) {
+  const { data, error } = await supabase
+    .from('sales_order_items')
+    .select('*')
+    .eq('sales_order_id', orderId);
 
-  const newStatus = submittedTotal >= orderTotal ? 'pending_admin' : 'pending';
+  if (error) throw error;
 
-  if (order.status !== newStatus) {
-    const { error: updateError } = await supabase
-      .from('sales_orders')
-      .update({ status: newStatus })
-      .eq('id', orderId);
-
-    if (updateError) throw updateError;
-
-    await supabase.from('order_history').insert({
-      sales_order_id: orderId,
-      action: 'payment_progress_updated',
-      old_status: order.status,
-      new_status: newStatus,
-      performed_by: performedBy,
-      performed_by_name: performedByName,
-      notes:
-        newStatus === 'pending_admin'
-          ? 'Full payment submitted by worker, waiting for admin approval'
-          : 'Partial payment submitted, order remains pending',
-    });
-  }
-
-  return newStatus;
+  return data || [];
 }
 
 async function reserveOrderItems(
@@ -128,13 +100,7 @@ async function reserveOrderItems(
   performedByName: string | null = null,
   customerId: string | null = null
 ) {
-  const { data: items, error: itemsError } = await supabase
-    .from('sales_order_items')
-    .select('*')
-    .eq('sales_order_id', orderId);
-
-  if (itemsError) throw itemsError;
-  if (!items || items.length === 0) return;
+  const items = await getOrderItems(orderId);
 
   for (const item of items) {
     if (item.item_type === 'vehicle' && item.vehicle_id) {
@@ -154,7 +120,7 @@ async function reserveOrderItems(
 
         if (updateVehicleError) throw updateVehicleError;
 
-        const { data: existingReservedHistory, error: existingHistoryError } =
+        const { data: existingHistory, error: existingHistoryError } =
           await supabase
             .from('vehicle_history')
             .select('id')
@@ -165,7 +131,7 @@ async function reserveOrderItems(
 
         if (existingHistoryError) throw existingHistoryError;
 
-        if (!existingReservedHistory) {
+        if (!existingHistory) {
           const { error: historyError } = await supabase
             .from('vehicle_history')
             .insert({
@@ -186,16 +152,6 @@ async function reserveOrderItems(
     }
 
     if (item.item_type === 'part' && item.part_id) {
-      const { data: part, error: partError } = await supabase
-        .from('parts')
-        .select('reserved_quantity')
-        .eq('id', item.part_id)
-        .single();
-
-      if (partError) throw partError;
-
-      const currentReserved = Number(part?.reserved_quantity || 0);
-
       const { data: existingReservation, error: existingReservationError } =
         await supabase
           .from('part_transactions')
@@ -207,33 +163,42 @@ async function reserveOrderItems(
 
       if (existingReservationError) throw existingReservationError;
 
-      if (!existingReservation) {
-        const newReserved = currentReserved + Number(item.quantity || 0);
+      if (existingReservation) continue;
 
-        const { error: updatePartError } = await supabase
-          .from('parts')
-          .update({ reserved_quantity: newReserved })
-          .eq('id', item.part_id);
+      const { data: part, error: partError } = await supabase
+        .from('parts')
+        .select('reserved_quantity')
+        .eq('id', item.part_id)
+        .single();
 
-        if (updatePartError) throw updatePartError;
+      if (partError) throw partError;
 
-        const { error: transactionError } = await supabase
-          .from('part_transactions')
-          .insert({
-            part_id: item.part_id,
-            transaction_type: 'reserved',
-            quantity_change: item.quantity,
-            quantity_after: newReserved,
-            sales_order_id: orderId,
-            performed_by: performedBy,
-            performed_by_name: performedByName,
-            confirmed_by: null,
-            confirmed_by_name: null,
-            notes: 'Reserved after worker submitted payment',
-          });
+      const newReserved =
+        Number(part?.reserved_quantity || 0) + Number(item.quantity || 0);
 
-        if (transactionError) throw transactionError;
-      }
+      const { error: updatePartError } = await supabase
+        .from('parts')
+        .update({ reserved_quantity: newReserved })
+        .eq('id', item.part_id);
+
+      if (updatePartError) throw updatePartError;
+
+      const { error: transactionError } = await supabase
+        .from('part_transactions')
+        .insert({
+          part_id: item.part_id,
+          transaction_type: 'reserved',
+          quantity_change: Number(item.quantity || 0),
+          quantity_after: newReserved,
+          sales_order_id: orderId,
+          performed_by: performedBy,
+          performed_by_name: performedByName,
+          confirmed_by: null,
+          confirmed_by_name: null,
+          notes: 'Reserved after worker submitted payment',
+        });
+
+      if (transactionError) throw transactionError;
     }
   }
 }
@@ -243,13 +208,7 @@ async function releaseReservedItems(
   performedBy: string | null = null,
   performedByName: string | null = null
 ) {
-  const { data: items, error: itemsError } = await supabase
-    .from('sales_order_items')
-    .select('*')
-    .eq('sales_order_id', orderId);
-
-  if (itemsError) throw itemsError;
-  if (!items) return;
+  const items = await getOrderItems(orderId);
 
   for (const item of items) {
     if (item.item_type === 'vehicle' && item.vehicle_id) {
@@ -313,6 +272,250 @@ async function releaseReservedItems(
   }
 }
 
+async function sellPartItemsForOrder(
+  orderId: string,
+  order: any,
+  performedBy: string | null = null,
+  performedByName: string | null = null,
+  confirmedBy: string | null = null,
+  confirmedByName: string | null = null,
+  notes = 'Part sale completed automatically after full worker payment'
+) {
+  const items = await getOrderItems(orderId);
+
+  for (const item of items) {
+    if (item.item_type !== 'part' || !item.part_id) continue;
+
+    const soldQty = Number(item.quantity || 0);
+
+    const { data: existingSoldTransaction, error: existingSoldError } =
+      await supabase
+        .from('part_transactions')
+        .select('id')
+        .eq('part_id', item.part_id)
+        .eq('sales_order_id', orderId)
+        .eq('transaction_type', 'sold')
+        .maybeSingle();
+
+    if (existingSoldError) throw existingSoldError;
+
+    // Prevent stock from being reduced twice.
+    if (existingSoldTransaction) continue;
+
+    const { data: part, error: partError } = await supabase
+      .from('parts')
+      .select('quantity, reserved_quantity')
+      .eq('id', item.part_id)
+      .single();
+
+    if (partError) throw partError;
+
+    const newQuantity = Math.max(0, Number(part.quantity || 0) - soldQty);
+    const newReserved = Math.max(
+      0,
+      Number(part.reserved_quantity || 0) - soldQty
+    );
+
+    const { error: partUpdateError } = await supabase
+      .from('parts')
+      .update({
+        quantity: newQuantity,
+        reserved_quantity: newReserved,
+      })
+      .eq('id', item.part_id);
+
+    if (partUpdateError) throw partUpdateError;
+
+    const { data: existingReservedTransaction, error: reservedError } =
+      await supabase
+        .from('part_transactions')
+        .select('id')
+        .eq('part_id', item.part_id)
+        .eq('sales_order_id', orderId)
+        .eq('transaction_type', 'reserved')
+        .maybeSingle();
+
+    if (reservedError) throw reservedError;
+
+    if (existingReservedTransaction) {
+      const { error: updateTransactionError } = await supabase
+        .from('part_transactions')
+        .update({
+          transaction_type: 'sold',
+          quantity_change: -soldQty,
+          quantity_after: newQuantity,
+          performed_by: order.performed_by || performedBy,
+          performed_by_name: order.performed_by_name || performedByName,
+          confirmed_by: confirmedBy,
+          confirmed_by_name: confirmedByName,
+          notes,
+        })
+        .eq('id', existingReservedTransaction.id);
+
+      if (updateTransactionError) throw updateTransactionError;
+    } else {
+      const { error: insertTransactionError } = await supabase
+        .from('part_transactions')
+        .insert({
+          part_id: item.part_id,
+          transaction_type: 'sold',
+          quantity_change: -soldQty,
+          quantity_after: newQuantity,
+          sales_order_id: orderId,
+          performed_by: order.performed_by || performedBy,
+          performed_by_name: order.performed_by_name || performedByName,
+          confirmed_by: confirmedBy,
+          confirmed_by_name: confirmedByName,
+          notes,
+        });
+
+      if (insertTransactionError) throw insertTransactionError;
+    }
+  }
+}
+
+async function completePaidPartOrderAutomatically(
+  orderId: string,
+  performedBy: string | null = null,
+  performedByName: string | null = null
+) {
+  const { data: order, error: orderError } = await supabase
+    .from('sales_orders')
+    .select('*')
+    .eq('id', orderId)
+    .single();
+
+  if (orderError) throw orderError;
+  if (!order) return null;
+
+  if (order.status === 'cancelled' || order.status === 'confirmed') {
+    return order.status;
+  }
+
+  const hasVehicle = await orderHasVehicleItem(orderId);
+
+  if (hasVehicle) {
+    return order.status;
+  }
+
+  const submittedTotal = await getSubmittedPaymentTotal(orderId);
+  const orderTotal = Number(order.total_amount || 0);
+
+  if (submittedTotal < orderTotal) {
+    return 'pending';
+  }
+
+  await sellPartItemsForOrder(
+    orderId,
+    order,
+    performedBy,
+    performedByName,
+    null,
+    null,
+    'Full payment received for parts. Worker completed the sale automatically.'
+  );
+
+  const { error: paymentUpdateError } = await supabase
+    .from('payments')
+    .update({
+      status: 'confirmed',
+      confirmed_by: null,
+      confirmed_by_name: null,
+      confirmed_at: new Date().toISOString(),
+      notes: 'Auto-confirmed because part sale was fully paid by worker',
+    })
+    .eq('sales_order_id', orderId)
+    .eq('status', 'pending');
+
+  if (paymentUpdateError) throw paymentUpdateError;
+
+  const { error: orderUpdateError } = await supabase
+    .from('sales_orders')
+    .update({
+      status: 'completed',
+      confirmed_by: null,
+      confirmed_by_name: null,
+      confirmed_at: new Date().toISOString(),
+    })
+    .eq('id', orderId);
+
+  if (orderUpdateError) throw orderUpdateError;
+
+  await supabase.from('order_history').insert({
+    sales_order_id: orderId,
+    action: 'parts_auto_completed',
+    old_status: order.status,
+    new_status: 'completed',
+    performed_by: order.performed_by || performedBy,
+    performed_by_name: order.performed_by_name || performedByName,
+    confirmed_by: null,
+    confirmed_by_name: null,
+    notes:
+      'Full payment received for parts. Worker completed the sale automatically.',
+  });
+
+  return 'completed';
+}
+
+async function updateOrderStatusFromSubmittedPayments(
+  orderId: string,
+  performedBy: string | null = null,
+  performedByName: string | null = null
+) {
+  const { data: order, error: orderError } = await supabase
+    .from('sales_orders')
+    .select('id, total_amount, status')
+    .eq('id', orderId)
+    .single();
+
+  if (orderError) throw orderError;
+  if (!order) return null;
+
+  if (TERMINAL_ORDER_STATUSES.includes(order.status)) {
+    return order.status;
+  }
+
+  const submittedTotal = await getSubmittedPaymentTotal(orderId);
+  const orderTotal = Number(order.total_amount || 0);
+  const hasVehicle = await orderHasVehicleItem(orderId);
+
+  if (submittedTotal >= orderTotal && !hasVehicle) {
+    return completePaidPartOrderAutomatically(
+      orderId,
+      performedBy,
+      performedByName
+    );
+  }
+
+  const newStatus = submittedTotal >= orderTotal ? 'pending_admin' : 'pending';
+
+  if (order.status !== newStatus) {
+    const { error: updateError } = await supabase
+      .from('sales_orders')
+      .update({ status: newStatus })
+      .eq('id', orderId);
+
+    if (updateError) throw updateError;
+
+    await supabase.from('order_history').insert({
+      sales_order_id: orderId,
+      action: 'payment_progress_updated',
+      old_status: order.status,
+      new_status: newStatus,
+      performed_by: performedBy,
+      performed_by_name: performedByName,
+      confirmed_by: null,
+      confirmed_by_name: null,
+      notes:
+        newStatus === 'pending_admin'
+          ? 'Full vehicle payment submitted by worker, waiting for admin approval'
+          : 'Partial payment submitted, order remains pending',
+    });
+  }
+
+  return newStatus;
+}
+
 // ============================================
 // GET ALL SALES ORDERS
 // ============================================
@@ -323,13 +526,8 @@ export const getSalesOrders = async (req: Request, res: Response) => {
 
     let query = supabase.from('sales_orders').select('*', { count: 'exact' });
 
-    if (status) {
-      query = query.eq('status', status);
-    }
-
-    if (customer_id) {
-      query = query.eq('customer_id', customer_id);
-    }
+    if (status) query = query.eq('status', status);
+    if (customer_id) query = query.eq('customer_id', customer_id);
 
     const from = parseInt(offset as string);
     const to = from + parseInt(limit as string) - 1;
@@ -362,7 +560,7 @@ export const getSalesOrders = async (req: Request, res: Response) => {
       })
     );
 
-    res.json({
+    return res.json({
       success: true,
       data: ordersWithCustomers,
       pagination: {
@@ -373,14 +571,9 @@ export const getSalesOrders = async (req: Request, res: Response) => {
       message: 'Sales orders fetched successfully',
     });
   } catch (error: any) {
-    console.error('Error fetching sales orders:', {
-      message: error.message,
-      details: error.details,
-      hint: error.hint,
-      code: error.code,
-    });
+    console.error('Error fetching sales orders:', error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message || 'Failed to fetch sales orders',
       details: error.details || null,
@@ -450,11 +643,13 @@ export const getSalesOrderById = async (req: Request, res: Response) => {
 
     if (itemsError) throw itemsError;
 
-    const { data: payments } = await supabase
+    const { data: payments, error: paymentsError } = await supabase
       .from('payments')
       .select('*')
       .eq('sales_order_id', id)
       .order('created_at', { ascending: false });
+
+    if (paymentsError) throw paymentsError;
 
     const totalConfirmed =
       payments
@@ -491,7 +686,7 @@ export const getSalesOrderById = async (req: Request, res: Response) => {
           }),
       })) || [];
 
-    res.json({
+    return res.json({
       success: true,
       data: {
         ...order,
@@ -510,14 +705,9 @@ export const getSalesOrderById = async (req: Request, res: Response) => {
       message: 'Sales order fetched successfully',
     });
   } catch (error: any) {
-    console.error('Error fetching sales order:', {
-      message: error.message,
-      details: error.details,
-      hint: error.hint,
-      code: error.code,
-    });
+    console.error('Error fetching sales order:', error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message || 'Failed to fetch sales order',
       details: error.details || null,
@@ -529,6 +719,9 @@ export const getSalesOrderById = async (req: Request, res: Response) => {
 
 // ============================================
 // CREATE SALES ORDER
+// Vehicle full payment -> pending_admin.
+// Part full payment -> completed automatically.
+// Partial payment -> pending and reserved.
 // ============================================
 
 export const createSalesOrder = async (req: Request, res: Response) => {
@@ -665,7 +858,9 @@ export const createSalesOrder = async (req: Request, res: Response) => {
 
         const { data: vehicle, error: vehicleError } = await supabase
           .from('vehicles')
-          .select('id, model, unit_price, status, chassis_number, specifications')
+          .select(
+            'id, model, unit_price, status, chassis_number, specifications'
+          )
           .eq('id', vehicleId)
           .single();
 
@@ -792,8 +987,14 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       });
     }
 
-    const initialStatus =
-      paymentAmount >= totalAmount ? 'pending_admin' : 'pending';
+    const hasVehicleItem = orderItems.some((item) => item.item_type === 'vehicle');
+    const isFullyPaid = paymentAmount >= totalAmount;
+
+    const initialStatus = isFullyPaid
+      ? hasVehicleItem
+        ? 'pending_admin'
+        : 'completed'
+      : 'pending';
 
     let order: any = null;
     let orderError: any = null;
@@ -814,6 +1015,8 @@ export const createSalesOrder = async (req: Request, res: Response) => {
             performed_by_name: performedByName,
             confirmed_by: null,
             confirmed_by_name: null,
+            confirmed_at:
+              initialStatus === 'completed' ? new Date().toISOString() : null,
           },
         ])
         .select()
@@ -862,6 +1065,8 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       });
     }
 
+    const paymentStatus = initialStatus === 'completed' ? 'confirmed' : 'pending';
+
     const { error: paymentError } = await supabase.from('payments').insert([
       {
         sales_order_id: order.id,
@@ -870,12 +1075,17 @@ export const createSalesOrder = async (req: Request, res: Response) => {
         reference_number:
           payment_method === 'cash' ? null : reference_number || null,
         amount: paymentAmount,
-        status: 'pending',
+        status: paymentStatus,
         performed_by: performedBy,
         performed_by_name: performedByName,
         confirmed_by: null,
         confirmed_by_name: null,
-        notes: null,
+        confirmed_at:
+          initialStatus === 'completed' ? new Date().toISOString() : null,
+        notes:
+          initialStatus === 'completed'
+            ? 'Auto-confirmed because part sale was fully paid by worker'
+            : null,
       },
     ]);
 
@@ -896,12 +1106,25 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       });
     }
 
-    await reserveOrderItems(order.id, performedBy, performedByName, customer_id);
+    if (initialStatus === 'completed') {
+      await sellPartItemsForOrder(
+        order.id,
+        order,
+        performedBy,
+        performedByName,
+        null,
+        null,
+        'Part sale fully paid and completed automatically by worker'
+      );
+    } else {
+      await reserveOrderItems(order.id, performedBy, performedByName, customer_id);
+    }
 
     const { error: historyError } = await supabase.from('order_history').insert([
       {
         sales_order_id: order.id,
-        action: 'created',
+        action:
+          initialStatus === 'completed' ? 'parts_auto_completed' : 'created',
         old_status: null,
         new_status: initialStatus,
         performed_by: performedBy,
@@ -910,7 +1133,9 @@ export const createSalesOrder = async (req: Request, res: Response) => {
         confirmed_by_name: null,
         notes:
           initialStatus === 'pending_admin'
-            ? 'Order created with full submitted payment, waiting for admin approval'
+            ? 'Vehicle order created with full submitted payment, waiting for admin approval'
+            : initialStatus === 'completed'
+            ? 'Part order fully paid and completed automatically by worker'
             : 'Order created with partial payment and inventory reserved',
       },
     ]);
@@ -931,7 +1156,7 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       deposit_amount: paymentAmount,
       submitted_amount: paymentAmount,
       remaining_amount: Math.max(0, totalAmount - paymentAmount),
-      deposit_status: 'pending',
+      deposit_status: paymentStatus,
       notes: notes || null,
       created_at: order.created_at,
       status: initialStatus,
@@ -959,19 +1184,15 @@ export const createSalesOrder = async (req: Request, res: Response) => {
       data: responseData,
       message:
         initialStatus === 'pending_admin'
-          ? `Sales order ${responseData.order_number} fully paid and sent for admin approval.`
+          ? `Vehicle sale request ${responseData.order_number} fully paid and sent for admin approval.`
+          : initialStatus === 'completed'
+          ? `Part sale ${responseData.order_number} fully paid and completed automatically.`
           : `Sales order ${responseData.order_number} partially paid and reserved. Remaining: ${
               totalAmount - paymentAmount
             }`,
     });
   } catch (error: any) {
-    console.error('Error creating sales order:', {
-      message: error.message,
-      details: error.details,
-      hint: error.hint,
-      code: error.code,
-      stack: error.stack,
-    });
+    console.error('Error creating sales order:', error);
 
     return res.status(500).json({
       success: false,
@@ -985,7 +1206,6 @@ export const createSalesOrder = async (req: Request, res: Response) => {
 
 // ============================================
 // UPDATE SALE REQUEST BEFORE ADMIN APPROVAL
-// Worker can edit request while status is pending/pending_admin.
 // ============================================
 
 export const updateSaleRequest = async (req: Request, res: Response) => {
@@ -1078,13 +1298,8 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
     let newVehicleId = oldVehicleId;
     let newPartId = oldPartId;
 
-    if (vehicle_id || chassis_number) {
-      newItemType = 'vehicle';
-    }
-
-    if (part_id || part_number) {
-      newItemType = 'part';
-    }
+    if (vehicle_id || chassis_number) newItemType = 'vehicle';
+    if (part_id || part_number) newItemType = 'part';
 
     if (!['vehicle', 'part'].includes(newItemType)) {
       return res.status(400).json({
@@ -1099,9 +1314,7 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
     if (newItemType === 'vehicle') {
       newPartId = null;
 
-      if (vehicle_id || item_id) {
-        newVehicleId = vehicle_id || item_id;
-      }
+      if (vehicle_id || item_id) newVehicleId = vehicle_id || item_id;
 
       if (!newVehicleId && chassis_number) {
         const { data: vehicleByChassis, error: chassisError } = await supabase
@@ -1158,9 +1371,7 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
     if (newItemType === 'part') {
       newVehicleId = null;
 
-      if (part_id || item_id) {
-        newPartId = part_id || item_id;
-      }
+      if (part_id || item_id) newPartId = part_id || item_id;
 
       if (!newPartId && part_number) {
         const { data: partByNumber, error: partNumberError } = await supabase
@@ -1407,10 +1618,9 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
       let newReservedQuantity = Number(currentPart.reserved_quantity || 0);
 
       if (isSamePart) {
-        newReservedQuantity =
-          newReservedQuantity + (newQuantity - oldQuantity);
+        newReservedQuantity += newQuantity - oldQuantity;
       } else {
-        newReservedQuantity = newReservedQuantity + newQuantity;
+        newReservedQuantity += newQuantity;
       }
 
       newReservedQuantity = Math.max(0, newReservedQuantity);
@@ -1422,38 +1632,25 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
 
       if (reservePartError) throw reservePartError;
 
-      if (isSamePart) {
-        const { data: existingReservedTransaction } = await supabase
-          .from('part_transactions')
-          .select('id')
-          .eq('part_id', newPartId)
-          .eq('sales_order_id', id)
-          .eq('transaction_type', 'reserved')
-          .maybeSingle();
+      const { data: existingReservedTransaction } = await supabase
+        .from('part_transactions')
+        .select('id')
+        .eq('part_id', newPartId)
+        .eq('sales_order_id', id)
+        .eq('transaction_type', 'reserved')
+        .maybeSingle();
 
-        if (existingReservedTransaction) {
-          await supabase
-            .from('part_transactions')
-            .update({
-              quantity_change: newQuantity,
-              quantity_after: newReservedQuantity,
-              performed_by: actor.id,
-              performed_by_name: actor.name,
-              notes: `Worker edited request quantity from ${oldQuantity} to ${newQuantity}`,
-            })
-            .eq('id', existingReservedTransaction.id);
-        } else {
-          await supabase.from('part_transactions').insert({
-            part_id: newPartId,
-            transaction_type: 'reserved',
+      if (existingReservedTransaction) {
+        await supabase
+          .from('part_transactions')
+          .update({
             quantity_change: newQuantity,
             quantity_after: newReservedQuantity,
-            sales_order_id: id,
             performed_by: actor.id,
             performed_by_name: actor.name,
-            notes: 'Worker edited request and reserved part quantity',
-          });
-        }
+            notes: `Worker edited request quantity from ${oldQuantity} to ${newQuantity}`,
+          })
+          .eq('id', existingReservedTransaction.id);
       } else {
         await supabase.from('part_transactions').insert({
           part_id: newPartId,
@@ -1463,7 +1660,9 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
           sales_order_id: id,
           performed_by: actor.id,
           performed_by_name: actor.name,
-          notes: 'Worker edited request and reserved new part',
+          notes: isSamePart
+            ? 'Worker edited request and reserved part quantity'
+            : 'Worker edited request and reserved new part',
         });
       }
     }
@@ -1554,14 +1753,21 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
     }
 
     const submittedAfterEdit = await getSubmittedPaymentTotal(id);
+
     const newStatus =
-      submittedAfterEdit >= newTotalAmount ? 'pending_admin' : 'pending';
+      submittedAfterEdit >= newTotalAmount
+        ? newItemType === 'vehicle'
+          ? 'pending_admin'
+          : 'completed'
+        : 'pending';
 
     const orderUpdates: any = {
       total_amount: newTotalAmount,
       status: newStatus,
       performed_by: order.performed_by || actor.id,
       performed_by_name: order.performed_by_name || actor.name,
+      confirmed_at:
+        newStatus === 'completed' ? new Date().toISOString() : order.confirmed_at,
     };
 
     if (customer_id !== undefined) orderUpdates.customer_id = customer_id;
@@ -1576,6 +1782,10 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
 
     if (updateOrderError) throw updateOrderError;
 
+    if (newStatus === 'completed') {
+      await completePaidPartOrderAutomatically(id, actor.id, actor.name);
+    }
+
     await supabase.from('order_history').insert({
       sales_order_id: id,
       action: 'request_edited',
@@ -1583,7 +1793,10 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
       new_status: newStatus,
       performed_by: actor.id,
       performed_by_name: actor.name,
-      notes: 'Worker edited sale request before admin approval',
+      notes:
+        newStatus === 'completed'
+          ? 'Worker edited sale request and part sale completed automatically'
+          : 'Worker edited sale request before admin approval',
     });
 
     return res.json({
@@ -1593,16 +1806,13 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
         submitted_amount: submittedAfterEdit,
         remaining_amount: Math.max(0, newTotalAmount - submittedAfterEdit),
       },
-      message: 'Sale request updated successfully',
+      message:
+        newStatus === 'completed'
+          ? 'Part sale fully paid and completed automatically'
+          : 'Sale request updated successfully',
     });
   } catch (error: any) {
-    console.error('Error updating sale request:', {
-      message: error.message,
-      details: error.details,
-      hint: error.hint,
-      code: error.code,
-      stack: error.stack,
-    });
+    console.error('Error updating sale request:', error);
 
     return res.status(500).json({
       success: false,
@@ -1616,6 +1826,9 @@ export const updateSaleRequest = async (req: Request, res: Response) => {
 
 // ============================================
 // UPDATE ORDER STATUS
+// Admin approval flow.
+// Vehicles are sold here after admin confirmation.
+// Parts can also be sold here if admin manually confirms.
 // ============================================
 
 export const updateOrderStatus = async (req: Request, res: Response) => {
@@ -1631,7 +1844,6 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
 
     const confirmedBy = cleanNullable(confirmed_by);
     const confirmedByName = cleanNullable(confirmed_by_name);
-
     const fallbackPerformedBy = cleanNullable(performed_by);
     const fallbackPerformedByName = cleanNullable(performed_by_name);
 
@@ -1668,181 +1880,88 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
 
     const oldStatus = order.status;
 
-    if (status === 'confirmed' && oldStatus !== 'pending_admin') {
-      return res.status(400).json({
-        success: false,
-        error: 'Only orders waiting for admin approval can be confirmed',
+    if (oldStatus === status) {
+      return res.json({
+        success: true,
+        data: order,
+        message: `Order is already ${status}`,
       });
     }
 
-    const updateData: any = { status };
+    const updateData: any = {
+      status,
+    };
 
-    if (status === 'confirmed') {
-      updateData.confirmed_at = new Date().toISOString();
+    if (status === 'confirmed' || status === 'completed') {
       updateData.confirmed_by = confirmedBy;
       updateData.confirmed_by_name = confirmedByName;
+      updateData.confirmed_at = new Date().toISOString();
 
-      const { data: items, error: itemsError } = await supabase
-        .from('sales_order_items')
-        .select('*')
-        .eq('sales_order_id', id);
+      const { error: confirmPaymentsError } = await supabase
+        .from('payments')
+        .update({
+          status: 'confirmed',
+          confirmed_by: confirmedBy,
+          confirmed_by_name: confirmedByName,
+          confirmed_at: new Date().toISOString(),
+        })
+        .eq('sales_order_id', id)
+        .eq('status', 'pending');
 
-      if (itemsError) throw itemsError;
+      if (confirmPaymentsError) throw confirmPaymentsError;
 
-      for (const item of items || []) {
-        if (item.item_type === 'vehicle') {
-          const { error: vehicleUpdateError } = await supabase
+      const items = await getOrderItems(id);
+
+      for (const item of items) {
+        if (item.item_type === 'vehicle' && item.vehicle_id) {
+          const { error: updateVehicleError } = await supabase
             .from('vehicles')
             .update({ status: 'sold' })
             .eq('id', item.vehicle_id);
 
-          if (vehicleUpdateError) throw vehicleUpdateError;
+          if (updateVehicleError) throw updateVehicleError;
 
-          const { data: existingReservedHistory, error: reservedHistoryError } =
+          const { data: existingSoldHistory, error: existingSoldHistoryError } =
             await supabase
               .from('vehicle_history')
               .select('id')
               .eq('vehicle_id', item.vehicle_id)
               .eq('sales_order_id', id)
-              .eq('event_type', 'reserved')
+              .eq('event_type', 'sold')
               .maybeSingle();
 
-          if (reservedHistoryError) throw reservedHistoryError;
+          if (existingSoldHistoryError) throw existingSoldHistoryError;
 
-          if (existingReservedHistory) {
-            const { error: updateHistoryError } = await supabase
+          if (!existingSoldHistory) {
+            const { error: insertHistoryError } = await supabase
               .from('vehicle_history')
-              .update({
+              .insert({
+                vehicle_id: item.vehicle_id,
                 event_type: 'sold',
+                customer_id: order.customer_id,
+                sales_order_id: id,
+                performed_by: order.performed_by || fallbackPerformedBy,
+                performed_by_name:
+                  order.performed_by_name || fallbackPerformedByName,
                 confirmed_by: confirmedBy,
                 confirmed_by_name: confirmedByName,
                 notes: 'Sale confirmed by admin',
-              })
-              .eq('id', existingReservedHistory.id);
+              });
 
-            if (updateHistoryError) throw updateHistoryError;
-          } else {
-            const { data: existingSoldHistory, error: existingSoldHistoryError } =
-              await supabase
-                .from('vehicle_history')
-                .select('id')
-                .eq('vehicle_id', item.vehicle_id)
-                .eq('sales_order_id', id)
-                .eq('event_type', 'sold')
-                .maybeSingle();
-
-            if (existingSoldHistoryError) throw existingSoldHistoryError;
-
-            if (!existingSoldHistory) {
-              const { error: insertHistoryError } = await supabase
-                .from('vehicle_history')
-                .insert({
-                  vehicle_id: item.vehicle_id,
-                  event_type: 'sold',
-                  customer_id: order.customer_id || null,
-                  sales_order_id: id,
-                  performed_by: order.performed_by || fallbackPerformedBy,
-                  performed_by_name:
-                    order.performed_by_name || fallbackPerformedByName,
-                  confirmed_by: confirmedBy,
-                  confirmed_by_name: confirmedByName,
-                  notes: 'Sale confirmed by admin',
-                });
-
-              if (insertHistoryError) throw insertHistoryError;
-            }
-          }
-        }
-
-        if (item.item_type === 'part') {
-          const { data: part, error: partError } = await supabase
-            .from('parts')
-            .select('quantity, reserved_quantity')
-            .eq('id', item.part_id)
-            .single();
-
-          if (partError) throw partError;
-
-          const soldQty = Number(item.quantity || 0);
-          const newQuantity = Math.max(0, Number(part.quantity || 0) - soldQty);
-          const newReserved = Math.max(
-            0,
-            Number(part.reserved_quantity || 0) - soldQty
-          );
-
-          const { error: partUpdateError } = await supabase
-            .from('parts')
-            .update({
-              quantity: newQuantity,
-              reserved_quantity: newReserved,
-            })
-            .eq('id', item.part_id);
-
-          if (partUpdateError) throw partUpdateError;
-
-          const {
-            data: existingReservedTransaction,
-            error: reservedTransactionError,
-          } = await supabase
-            .from('part_transactions')
-            .select('id')
-            .eq('part_id', item.part_id)
-            .eq('sales_order_id', id)
-            .eq('transaction_type', 'reserved')
-            .maybeSingle();
-
-          if (reservedTransactionError) throw reservedTransactionError;
-
-          if (existingReservedTransaction) {
-            const { error: updateTransactionError } = await supabase
-              .from('part_transactions')
-              .update({
-                transaction_type: 'sold',
-                quantity_change: -soldQty,
-                quantity_after: newQuantity,
-                confirmed_by: confirmedBy,
-                confirmed_by_name: confirmedByName,
-                notes: 'Sale confirmed by admin',
-              })
-              .eq('id', existingReservedTransaction.id);
-
-            if (updateTransactionError) throw updateTransactionError;
-          } else {
-            const {
-              data: existingSoldTransaction,
-              error: existingSoldTransactionError,
-            } = await supabase
-              .from('part_transactions')
-              .select('id')
-              .eq('part_id', item.part_id)
-              .eq('sales_order_id', id)
-              .eq('transaction_type', 'sold')
-              .maybeSingle();
-
-            if (existingSoldTransactionError) throw existingSoldTransactionError;
-
-            if (!existingSoldTransaction) {
-              const { error: insertTransactionError } = await supabase
-                .from('part_transactions')
-                .insert({
-                  part_id: item.part_id,
-                  transaction_type: 'sold',
-                  quantity_change: -soldQty,
-                  quantity_after: newQuantity,
-                  sales_order_id: id,
-                  performed_by: order.performed_by || fallbackPerformedBy,
-                  performed_by_name:
-                    order.performed_by_name || fallbackPerformedByName,
-                  confirmed_by: confirmedBy,
-                  confirmed_by_name: confirmedByName,
-                  notes: 'Sale confirmed by admin',
-                });
-
-              if (insertTransactionError) throw insertTransactionError;
-            }
+            if (insertHistoryError) throw insertHistoryError;
           }
         }
       }
+
+      await sellPartItemsForOrder(
+        id,
+        order,
+        fallbackPerformedBy,
+        fallbackPerformedByName,
+        confirmedBy,
+        confirmedByName,
+        'Sale confirmed by admin'
+      );
     }
 
     if (status === 'cancelled' && oldStatus !== 'cancelled') {
@@ -1871,8 +1990,14 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
         performed_by: order.performed_by || fallbackPerformedBy || null,
         performed_by_name:
           order.performed_by_name || fallbackPerformedByName || null,
-        confirmed_by: status === 'confirmed' ? confirmedBy : null,
-        confirmed_by_name: status === 'confirmed' ? confirmedByName : null,
+        confirmed_by:
+          status === 'confirmed' || status === 'completed'
+            ? confirmedBy
+            : null,
+        confirmed_by_name:
+          status === 'confirmed' || status === 'completed'
+            ? confirmedByName
+            : null,
         notes: `Status changed from ${oldStatus} to ${status}`,
       },
     ]);
@@ -1883,13 +2008,7 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
       message: `Order status updated to ${status} successfully`,
     });
   } catch (error: any) {
-    console.error('Error updating order status:', {
-      message: error.message,
-      details: error.details,
-      hint: error.hint,
-      code: error.code,
-      stack: error.stack,
-    });
+    console.error('Error updating order status:', error);
 
     return res.status(500).json({
       success: false,
@@ -1901,7 +2020,11 @@ export const updateOrderStatus = async (req: Request, res: Response) => {
   }
 };
 
+// ============================================
+// WORKER CONFIRM FULL PAYMENT
 // Kept for compatibility.
+// ============================================
+
 export const workerConfirmFullPayment = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
@@ -1913,25 +2036,22 @@ export const workerConfirmFullPayment = async (req: Request, res: Response) => {
       cleanNullable(performed_by_name)
     );
 
-    res.json({
+    return res.json({
       success: true,
       data: {
         order_status: newStatus,
       },
       message:
         newStatus === 'pending_admin'
-          ? 'Full payment submitted. Order sent to admin for final approval.'
+          ? 'Full vehicle payment submitted. Order sent to admin for final approval.'
+          : newStatus === 'completed'
+          ? 'Full part payment submitted. Part sale completed automatically.'
           : 'Order still has remaining balance.',
     });
   } catch (error: any) {
-    console.error('Error confirming full payment:', {
-      message: error.message,
-      details: error.details,
-      hint: error.hint,
-      code: error.code,
-    });
+    console.error('Error confirming full payment:', error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message || 'Failed to confirm payment',
       details: error.details || null,
@@ -2005,20 +2125,15 @@ export const cancelOrder = async (req: Request, res: Response) => {
       },
     ]);
 
-    res.json({
+    return res.json({
       success: true,
       data,
       message: 'Order cancelled successfully and inventory restored',
     });
   } catch (error: any) {
-    console.error('Error cancelling order:', {
-      message: error.message,
-      details: error.details,
-      hint: error.hint,
-      code: error.code,
-    });
+    console.error('Error cancelling order:', error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message || 'Failed to cancel order',
       details: error.details || null,
@@ -2066,19 +2181,14 @@ export const deleteOrder = async (req: Request, res: Response) => {
 
     if (error) throw error;
 
-    res.json({
+    return res.json({
       success: true,
       message: 'Order deleted successfully',
     });
   } catch (error: any) {
-    console.error('Error deleting order:', {
-      message: error.message,
-      details: error.details,
-      hint: error.hint,
-      code: error.code,
-    });
+    console.error('Error deleting order:', error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: error.message || 'Failed to delete order',
       details: error.details || null,

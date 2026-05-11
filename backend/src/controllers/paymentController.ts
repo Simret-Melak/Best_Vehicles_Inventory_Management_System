@@ -26,6 +26,208 @@ async function getSubmittedPaymentTotal(orderId: string) {
   }, 0);
 }
 
+async function getOrderItems(orderId: string) {
+  const { data, error } = await supabase
+    .from('sales_order_items')
+    .select('*')
+    .eq('sales_order_id', orderId);
+
+  if (error) throw error;
+
+  return data || [];
+}
+
+async function orderHasVehicleItem(orderId: string) {
+  const items = await getOrderItems(orderId);
+
+  return items.some((item) => item.item_type === 'vehicle');
+}
+
+async function sellPartItemsForOrder(
+  orderId: string,
+  order: any,
+  performedBy: string | null = null,
+  performedByName: string | null = null,
+  notes = 'Part sale completed automatically after full worker payment'
+) {
+  const items = await getOrderItems(orderId);
+
+  for (const item of items) {
+    if (item.item_type !== 'part' || !item.part_id) continue;
+
+    const soldQty = Number(item.quantity || 0);
+
+    const { data: existingSoldTransaction, error: existingSoldError } =
+      await supabase
+        .from('part_transactions')
+        .select('id')
+        .eq('part_id', item.part_id)
+        .eq('sales_order_id', orderId)
+        .eq('transaction_type', 'sold')
+        .maybeSingle();
+
+    if (existingSoldError) throw existingSoldError;
+
+    // Prevent stock from being reduced twice.
+    if (existingSoldTransaction) continue;
+
+    const { data: part, error: partError } = await supabase
+      .from('parts')
+      .select('quantity, reserved_quantity')
+      .eq('id', item.part_id)
+      .single();
+
+    if (partError) throw partError;
+
+    const newQuantity = Math.max(0, Number(part.quantity || 0) - soldQty);
+    const newReserved = Math.max(
+      0,
+      Number(part.reserved_quantity || 0) - soldQty
+    );
+
+    const { error: partUpdateError } = await supabase
+      .from('parts')
+      .update({
+        quantity: newQuantity,
+        reserved_quantity: newReserved,
+      })
+      .eq('id', item.part_id);
+
+    if (partUpdateError) throw partUpdateError;
+
+    const { data: existingReservedTransaction, error: reservedError } =
+      await supabase
+        .from('part_transactions')
+        .select('id')
+        .eq('part_id', item.part_id)
+        .eq('sales_order_id', orderId)
+        .eq('transaction_type', 'reserved')
+        .maybeSingle();
+
+    if (reservedError) throw reservedError;
+
+    if (existingReservedTransaction) {
+      const { error: updateTransactionError } = await supabase
+        .from('part_transactions')
+        .update({
+          transaction_type: 'sold',
+          quantity_change: -soldQty,
+          quantity_after: newQuantity,
+          performed_by: order.performed_by || performedBy,
+          performed_by_name: order.performed_by_name || performedByName,
+          confirmed_by: null,
+          confirmed_by_name: null,
+          notes,
+        })
+        .eq('id', existingReservedTransaction.id);
+
+      if (updateTransactionError) throw updateTransactionError;
+    } else {
+      const { error: insertTransactionError } = await supabase
+        .from('part_transactions')
+        .insert({
+          part_id: item.part_id,
+          transaction_type: 'sold',
+          quantity_change: -soldQty,
+          quantity_after: newQuantity,
+          sales_order_id: orderId,
+          performed_by: order.performed_by || performedBy,
+          performed_by_name: order.performed_by_name || performedByName,
+          confirmed_by: null,
+          confirmed_by_name: null,
+          notes,
+        });
+
+      if (insertTransactionError) throw insertTransactionError;
+    }
+  }
+}
+
+async function completePaidPartOrderAutomatically(
+  orderId: string,
+  performedBy: string | null = null,
+  performedByName: string | null = null
+) {
+  const { data: order, error: orderError } = await supabase
+    .from('sales_orders')
+    .select('*')
+    .eq('id', orderId)
+    .single();
+
+  if (orderError) throw orderError;
+  if (!order) return null;
+
+  if (order.status === 'cancelled' || order.status === 'confirmed') {
+    return order.status;
+  }
+
+  if (order.status === 'completed') {
+    return 'completed';
+  }
+
+  const hasVehicle = await orderHasVehicleItem(orderId);
+
+  if (hasVehicle) {
+    return order.status;
+  }
+
+  const submittedTotal = await getSubmittedPaymentTotal(orderId);
+  const orderTotal = Number(order.total_amount || 0);
+
+  if (submittedTotal < orderTotal) {
+    return 'pending';
+  }
+
+  await sellPartItemsForOrder(
+    orderId,
+    order,
+    performedBy,
+    performedByName,
+    'Full payment received for parts. Worker completed the sale automatically.'
+  );
+
+  const { error: paymentUpdateError } = await supabase
+    .from('payments')
+    .update({
+      status: 'confirmed',
+      confirmed_by: null,
+      confirmed_by_name: null,
+      confirmed_at: new Date().toISOString(),
+      notes: 'Auto-confirmed because part sale was fully paid by worker',
+    })
+    .eq('sales_order_id', orderId)
+    .eq('status', 'pending');
+
+  if (paymentUpdateError) throw paymentUpdateError;
+
+  const { error: orderUpdateError } = await supabase
+    .from('sales_orders')
+    .update({
+      status: 'completed',
+      confirmed_by: null,
+      confirmed_by_name: null,
+      confirmed_at: new Date().toISOString(),
+    })
+    .eq('id', orderId);
+
+  if (orderUpdateError) throw orderUpdateError;
+
+  await supabase.from('order_history').insert({
+    sales_order_id: orderId,
+    action: 'parts_auto_completed',
+    old_status: order.status,
+    new_status: 'completed',
+    performed_by: order.performed_by || performedBy,
+    performed_by_name: order.performed_by_name || performedByName,
+    confirmed_by: null,
+    confirmed_by_name: null,
+    notes:
+      'Full payment received for parts. Worker completed the sale automatically.',
+  });
+
+  return 'completed';
+}
+
 async function updateOrderStatusFromSubmittedPayments(
   orderId: string,
   performedBy: string | null = null,
@@ -46,6 +248,15 @@ async function updateOrderStatusFromSubmittedPayments(
 
   const submittedTotal = await getSubmittedPaymentTotal(orderId);
   const orderTotal = Number(order.total_amount || 0);
+  const hasVehicle = await orderHasVehicleItem(orderId);
+
+  if (submittedTotal >= orderTotal && !hasVehicle) {
+    return completePaidPartOrderAutomatically(
+      orderId,
+      performedBy,
+      performedByName
+    );
+  }
 
   const newStatus = submittedTotal >= orderTotal ? 'pending_admin' : 'pending';
 
@@ -68,7 +279,7 @@ async function updateOrderStatusFromSubmittedPayments(
       confirmed_by_name: null,
       notes:
         newStatus === 'pending_admin'
-          ? 'Full payment submitted by worker, waiting for admin approval'
+          ? 'Full vehicle payment submitted by worker, waiting for admin approval'
           : 'Partial payment submitted, order remains pending',
     });
   }
@@ -82,12 +293,8 @@ async function reserveOrderItems(
   performedByName: string | null = null,
   customerId: string | null = null
 ) {
-  const { data: items, error: itemsError } = await supabase
-    .from('sales_order_items')
-    .select('*')
-    .eq('sales_order_id', orderId);
+  const items = await getOrderItems(orderId);
 
-  if (itemsError) throw itemsError;
   if (!items || items.length === 0) return;
 
   for (const item of items) {
@@ -140,16 +347,6 @@ async function reserveOrderItems(
     }
 
     if (item.item_type === 'part' && item.part_id) {
-      const { data: part, error: partError } = await supabase
-        .from('parts')
-        .select('reserved_quantity')
-        .eq('id', item.part_id)
-        .single();
-
-      if (partError) throw partError;
-
-      const currentReserved = Number(part?.reserved_quantity || 0);
-
       const { data: existingReservation, error: existingReservationError } =
         await supabase
           .from('part_transactions')
@@ -161,33 +358,42 @@ async function reserveOrderItems(
 
       if (existingReservationError) throw existingReservationError;
 
-      if (!existingReservation) {
-        const newReserved = currentReserved + Number(item.quantity || 0);
+      if (existingReservation) continue;
 
-        const { error: updatePartError } = await supabase
-          .from('parts')
-          .update({ reserved_quantity: newReserved })
-          .eq('id', item.part_id);
+      const { data: part, error: partError } = await supabase
+        .from('parts')
+        .select('reserved_quantity')
+        .eq('id', item.part_id)
+        .single();
 
-        if (updatePartError) throw updatePartError;
+      if (partError) throw partError;
 
-        const { error: transactionError } = await supabase
-          .from('part_transactions')
-          .insert({
-            part_id: item.part_id,
-            transaction_type: 'reserved',
-            quantity_change: item.quantity,
-            quantity_after: newReserved,
-            sales_order_id: orderId,
-            performed_by: performedBy,
-            performed_by_name: performedByName,
-            confirmed_by: null,
-            confirmed_by_name: null,
-            notes: 'Reserved after worker submitted payment',
-          });
+      const newReserved =
+        Number(part?.reserved_quantity || 0) + Number(item.quantity || 0);
 
-        if (transactionError) throw transactionError;
-      }
+      const { error: updatePartError } = await supabase
+        .from('parts')
+        .update({ reserved_quantity: newReserved })
+        .eq('id', item.part_id);
+
+      if (updatePartError) throw updatePartError;
+
+      const { error: transactionError } = await supabase
+        .from('part_transactions')
+        .insert({
+          part_id: item.part_id,
+          transaction_type: 'reserved',
+          quantity_change: Number(item.quantity || 0),
+          quantity_after: newReserved,
+          sales_order_id: orderId,
+          performed_by: performedBy,
+          performed_by_name: performedByName,
+          confirmed_by: null,
+          confirmed_by_name: null,
+          notes: 'Reserved after worker submitted payment',
+        });
+
+      if (transactionError) throw transactionError;
     }
   }
 }
@@ -197,12 +403,8 @@ async function releaseReservedItems(
   performedBy: string | null = null,
   performedByName: string | null = null
 ) {
-  const { data: items, error: itemsError } = await supabase
-    .from('sales_order_items')
-    .select('*')
-    .eq('sales_order_id', orderId);
+  const items = await getOrderItems(orderId);
 
-  if (itemsError) throw itemsError;
   if (!items) return;
 
   for (const item of items) {
@@ -270,6 +472,8 @@ async function releaseReservedItems(
 // ============================================
 // RECORD DEPOSIT
 // Worker adds another payment.
+// Vehicle full payment -> pending_admin.
+// Part full payment -> completed automatically.
 // ============================================
 export const recordDeposit = async (req: Request, res: Response) => {
   try {
@@ -408,7 +612,8 @@ export const recordDeposit = async (req: Request, res: Response) => {
         bank_name: payment.bank_name,
         reference_number: payment.reference_number,
         amount: payment.amount,
-        payment_status: payment.status,
+        payment_status:
+          newOrderStatus === 'completed' ? 'confirmed' : payment.status,
         order_status: newOrderStatus,
         submitted_total: submittedTotal,
         order_total: orderTotal,
@@ -421,7 +626,9 @@ export const recordDeposit = async (req: Request, res: Response) => {
       },
       message:
         submittedTotal >= orderTotal
-          ? 'Full payment submitted. Order is now waiting for admin approval.'
+          ? newOrderStatus === 'completed'
+            ? 'Full part payment submitted. Part sale completed automatically.'
+            : 'Full vehicle payment submitted. Order is now waiting for admin approval.'
           : `Payment submitted. Remaining amount: ${remainingAmount}`,
     });
   } catch (error: any) {
@@ -559,7 +766,12 @@ export const confirmDeposit = async (req: Request, res: Response) => {
         remaining_balance: Math.max(0, orderTotal - submittedTotal),
         is_fully_submitted: submittedTotal >= orderTotal,
       },
-      message: `Deposit of ${payment.amount} confirmed successfully`,
+      message:
+        newOrderStatus === 'completed'
+          ? `Deposit of ${payment.amount} confirmed. Part sale completed automatically.`
+          : submittedTotal >= orderTotal
+          ? `Deposit of ${payment.amount} confirmed. Vehicle sale is waiting for admin approval.`
+          : `Deposit of ${payment.amount} confirmed successfully`,
     });
   } catch (error: any) {
     console.error('Error confirming deposit:', {
