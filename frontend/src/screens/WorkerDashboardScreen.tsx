@@ -16,6 +16,7 @@ import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import AddStockModal from '../components/AddStockModal';
 import RequestSaleModal from '../components/RequestSaleModal';
 import ItemHistoryModal from '../components/ItemHistoryModal';
+import EditItemModal from '../components/EditItemModal';
 import { inventoryApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
@@ -46,11 +47,13 @@ const InventoryCard = ({
   onAddStock,
   onRequestSale,
   onViewHistory,
+  onEdit,
 }: {
   item: InventoryItem;
   onAddStock: () => void;
   onRequestSale: () => void;
   onViewHistory: () => void;
+  onEdit: () => void;
 }) => {
   const isVehicle = !!item.chassis_number;
   const isSoldOut = isVehicle && item.status === 'sold';
@@ -118,8 +121,14 @@ const InventoryCard = ({
       ) : null}
 
       <View style={styles.cardActions}>
-        <TouchableOpacity style={styles.addStockButton} onPress={onAddStock}>
-          <Text style={styles.addStockButtonText}>+ Add Stock</Text>
+        {!isVehicle ? (
+          <TouchableOpacity style={styles.addStockButton} onPress={onAddStock}>
+            <Text style={styles.addStockButtonText}>+ Add Stock</Text>
+          </TouchableOpacity>
+        ) : null}
+
+        <TouchableOpacity style={styles.editButton} onPress={onEdit}>
+          <Text style={styles.editButtonText}>✏️ Edit</Text>
         </TouchableOpacity>
 
         {!isSoldOut && !isReserved && availableQty > 0 ? (
@@ -155,12 +164,23 @@ export default function WorkerDashboardScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const [addStockModalVisible, setAddStockModalVisible] = useState(false);
+  const [addStockSelectedItem, setAddStockSelectedItem] =
+    useState<InventoryItem | null>(null);
+
   const [requestSaleModalVisible, setRequestSaleModalVisible] = useState(false);
   const [selectedItem, setSelectedItem] = useState<InventoryItem | null>(null);
 
   const [itemHistoryVisible, setItemHistoryVisible] = useState(false);
   const [selectedHistoryItem, setSelectedHistoryItem] =
     useState<HistoryModalItem | null>(null);
+
+  const [editItemModalVisible, setEditItemModalVisible] = useState(false);
+  const [editSelectedItem, setEditSelectedItem] =
+    useState<InventoryItem | null>(null);
+
+  const determineItemType = (item: InventoryItem): 'vehicle' | 'part' => {
+    return item.chassis_number ? 'vehicle' : 'part';
+  };
 
   const loadInventory = async () => {
     try {
@@ -245,8 +265,34 @@ export default function WorkerDashboardScreen() {
     ]);
   };
 
+  const openAddStockModal = (item: InventoryItem | null = null) => {
+    setAddStockSelectedItem(item);
+    setAddStockModalVisible(true);
+  };
+
+  const closeAddStockModal = () => {
+    setAddStockModalVisible(false);
+    setAddStockSelectedItem(null);
+  };
+
   const handleAddStockSuccess = () => {
     loadInventory();
+    setAddStockSelectedItem(null);
+  };
+
+  const handleEditItem = (item: InventoryItem) => {
+    setEditSelectedItem(item);
+    setEditItemModalVisible(true);
+  };
+
+  const closeEditItemModal = () => {
+    setEditItemModalVisible(false);
+    setEditSelectedItem(null);
+  };
+
+  const handleEditItemSuccess = () => {
+    loadInventory();
+    setEditSelectedItem(null);
   };
 
   const handleRequestSale = (item: InventoryItem) => {
@@ -269,10 +315,6 @@ export default function WorkerDashboardScreen() {
 
   const navigateToWorkerPendingRequests = () => {
     navigation.navigate('WorkerPendingRequests' as never);
-  };
-
-  const determineItemType = (item: InventoryItem): 'vehicle' | 'part' => {
-    return item.chassis_number ? 'vehicle' : 'part';
   };
 
   const handleViewItemHistory = (item: InventoryItem) => {
@@ -324,9 +366,10 @@ export default function WorkerDashboardScreen() {
   const renderInventoryItem = ({ item }: { item: InventoryItem }) => (
     <InventoryCard
       item={item}
-      onAddStock={() => setAddStockModalVisible(true)}
+      onAddStock={() => openAddStockModal(item)}
       onRequestSale={() => handleRequestSale(item)}
       onViewHistory={() => handleViewItemHistory(item)}
+      onEdit={() => handleEditItem(item)}
     />
   );
 
@@ -407,7 +450,7 @@ export default function WorkerDashboardScreen() {
         <View style={styles.actionButtonRow}>
           <TouchableOpacity
             style={styles.addStockTopButton}
-            onPress={() => setAddStockModalVisible(true)}
+            onPress={() => openAddStockModal(null)}
           >
             <Text style={styles.addStockTopButtonText}>+ Add Stock</Text>
           </TouchableOpacity>
@@ -438,7 +481,15 @@ export default function WorkerDashboardScreen() {
 
       <AddStockModal
         visible={addStockModalVisible}
-        onClose={() => setAddStockModalVisible(false)}
+        onClose={closeAddStockModal}
+        initialItem={
+          addStockSelectedItem
+            ? {
+                id: addStockSelectedItem.id,
+                type: determineItemType(addStockSelectedItem),
+              }
+            : null
+        }
         vehicles={inventory
           .filter((item) => item.chassis_number)
           .map((item) => ({
@@ -514,6 +565,14 @@ export default function WorkerDashboardScreen() {
         visible={itemHistoryVisible}
         onClose={closeItemHistory}
         item={selectedHistoryItem}
+      />
+
+      <EditItemModal
+        visible={editItemModalVisible}
+        onClose={closeEditItemModal}
+        item={editSelectedItem}
+        itemType={editSelectedItem ? determineItemType(editSelectedItem) : 'part'}
+        onSuccess={handleEditItemSuccess}
       />
     </View>
   );
@@ -732,6 +791,19 @@ const styles = StyleSheet.create({
   },
   addStockButtonText: {
     color: '#ef4444',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  editButton: {
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.3)',
+  },
+  editButtonText: {
+    color: '#60a5fa',
     fontSize: 12,
     fontWeight: '500',
   },

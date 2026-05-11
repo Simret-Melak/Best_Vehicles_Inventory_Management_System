@@ -3,7 +3,7 @@ import axios from 'axios';
 // For iOS Simulator: http://localhost:3000
 // For Android Emulator: http://10.0.2.2:3000
 // For Physical Device: http://YOUR_IP_ADDRESS:3000
-const API_BASE_URL = 'http://192.168.1.121:3000/api';
+const API_BASE_URL = 'http://192.168.8.68:3000/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,

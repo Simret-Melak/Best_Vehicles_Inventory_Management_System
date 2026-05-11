@@ -38,16 +38,22 @@ interface Part {
   min_stock_alert: number;
 }
 
+type InventoryType = 'vehicle' | 'part';
+type ModeType = 'existing' | 'new';
+
+interface InitialItemSelection {
+  id: string;
+  type: InventoryType;
+}
+
 interface AddStockModalProps {
   visible: boolean;
   onClose: () => void;
   vehicles: Vehicle[];
   parts: Part[];
   onSuccess: () => void;
+  initialItem?: InitialItemSelection | null;
 }
-
-type InventoryType = 'vehicle' | 'part';
-type ModeType = 'existing' | 'new';
 
 const toNumber = (value: any) => {
   const numberValue = Number(value || 0);
@@ -68,6 +74,7 @@ export default function AddStockModal({
   vehicles = [],
   parts = [],
   onSuccess,
+  initialItem = null,
 }: AddStockModalProps) {
   const { user } = useAuth();
 
@@ -81,6 +88,8 @@ export default function AddStockModal({
   // super_admin = mainly user management, not inventory manipulation here
   const canManageInventory =
     userRole === 'worker' || userRole === 'store_manager';
+
+  const hasPresetItem = !!initialItem;
 
   const [inventoryType, setInventoryType] = useState<InventoryType>('part');
   const [mode, setMode] = useState<ModeType>('existing');
@@ -126,10 +135,23 @@ export default function AddStockModal({
   };
 
   useEffect(() => {
-    if (visible) {
-      resetForm();
+    if (!visible) return;
+
+    resetForm();
+
+    if (initialItem) {
+      setInventoryType(initialItem.type);
+      setMode('existing');
+
+      if (initialItem.type === 'vehicle') {
+        setSelectedVehicleId(initialItem.id);
+        setSelectedPartId('');
+      } else {
+        setSelectedPartId(initialItem.id);
+        setSelectedVehicleId('');
+      }
     }
-  }, [visible]);
+  }, [visible, initialItem?.id, initialItem?.type]);
 
   const handleClose = () => {
     resetForm();
@@ -163,6 +185,22 @@ export default function AddStockModal({
   );
 
   const selectedPart = parts.find((part) => part.id === selectedPartId);
+
+  const selectedItemName =
+    inventoryType === 'part'
+      ? selectedPart?.name || 'Selected part'
+      : selectedVehicle?.model || 'Selected vehicle';
+
+  const selectedItemSubText =
+    inventoryType === 'part'
+      ? `Current stock: ${toNumber(selectedPart?.quantity)} units • Available: ${
+          selectedPart?.available_quantity ??
+          toNumber(selectedPart?.quantity) -
+            toNumber(selectedPart?.reserved_quantity)
+        }`
+      : `Chassis: ${selectedVehicle?.chassis_number || 'N/A'} • Price: ETB ${toNumber(
+          selectedVehicle?.unit_price
+        ).toLocaleString()}`;
 
   const shouldShowQuantity = () => {
     if (inventoryType === 'part') return true;
@@ -462,127 +500,157 @@ export default function AddStockModal({
                 </View>
               ) : null}
 
-              <View style={styles.typeToggle}>
-                <TouchableOpacity
-                  style={[
-                    styles.typeButton,
-                    inventoryType === 'part' && styles.typeButtonActive,
-                  ]}
-                  onPress={() => {
-                    setInventoryType('part');
-                    setMode('existing');
-                    setSelectedVehicleId('');
-                    setSearchQuery('');
-                    setQuantity('');
-                  }}
-                >
-                  <Text
+              {!hasPresetItem ? (
+                <View style={styles.typeToggle}>
+                  <TouchableOpacity
                     style={[
-                      styles.typeButtonText,
-                      inventoryType === 'part' && styles.typeButtonTextActive,
+                      styles.typeButton,
+                      inventoryType === 'part' && styles.typeButtonActive,
                     ]}
+                    onPress={() => {
+                      setInventoryType('part');
+                      setMode('existing');
+                      setSelectedVehicleId('');
+                      setSearchQuery('');
+                      setQuantity('');
+                    }}
                   >
-                    🔧 Part
-                  </Text>
-                </TouchableOpacity>
+                    <Text
+                      style={[
+                        styles.typeButtonText,
+                        inventoryType === 'part' && styles.typeButtonTextActive,
+                      ]}
+                    >
+                      🔧 Part
+                    </Text>
+                  </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={[
-                    styles.typeButton,
-                    inventoryType === 'vehicle' && styles.typeButtonActive,
-                  ]}
-                  onPress={() => {
-                    setInventoryType('vehicle');
-                    setMode('new');
-                    setSelectedPartId('');
-                    setSearchQuery('');
-                    setQuantity('');
-                  }}
-                >
-                  <Text
+                  <TouchableOpacity
                     style={[
-                      styles.typeButtonText,
-                      inventoryType === 'vehicle' && styles.typeButtonTextActive,
+                      styles.typeButton,
+                      inventoryType === 'vehicle' && styles.typeButtonActive,
                     ]}
+                    onPress={() => {
+                      setInventoryType('vehicle');
+                      setMode('new');
+                      setSelectedPartId('');
+                      setSearchQuery('');
+                      setQuantity('');
+                    }}
                   >
-                    🚛 Vehicle
+                    <Text
+                      style={[
+                        styles.typeButtonText,
+                        inventoryType === 'vehicle' &&
+                          styles.typeButtonTextActive,
+                      ]}
+                    >
+                      🚛 Vehicle
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.lockedItemNotice}>
+                  <Text style={styles.lockedItemNoticeText}>
+                    {inventoryType === 'vehicle'
+                      ? '🚛 Adding stock for this vehicle'
+                      : '🔧 Adding stock for this part'}
                   </Text>
-                </TouchableOpacity>
-              </View>
+                </View>
+              )}
 
-              <View style={styles.modeToggle}>
-                <TouchableOpacity
-                  style={[
-                    styles.modeButton,
-                    mode === 'existing' && styles.modeButtonActive,
-                  ]}
-                  onPress={() => setMode('existing')}
-                >
-                  <Text
+              {!hasPresetItem ? (
+                <View style={styles.modeToggle}>
+                  <TouchableOpacity
                     style={[
-                      styles.modeButtonText,
-                      mode === 'existing' && styles.modeButtonTextActive,
+                      styles.modeButton,
+                      mode === 'existing' && styles.modeButtonActive,
                     ]}
+                    onPress={() => setMode('existing')}
                   >
-                    Existing {inventoryType === 'part' ? 'Part' : 'Model'}
-                  </Text>
-                </TouchableOpacity>
+                    <Text
+                      style={[
+                        styles.modeButtonText,
+                        mode === 'existing' && styles.modeButtonTextActive,
+                      ]}
+                    >
+                      Existing {inventoryType === 'part' ? 'Part' : 'Model'}
+                    </Text>
+                  </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={[
-                    styles.modeButton,
-                    mode === 'new' && styles.modeButtonActive,
-                  ]}
-                  onPress={() => setMode('new')}
-                >
-                  <Text
+                  <TouchableOpacity
                     style={[
-                      styles.modeButtonText,
-                      mode === 'new' && styles.modeButtonTextActive,
+                      styles.modeButton,
+                      mode === 'new' && styles.modeButtonActive,
                     ]}
+                    onPress={() => setMode('new')}
                   >
-                    New {inventoryType === 'part' ? 'Part' : 'Vehicle'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
+                    <Text
+                      style={[
+                        styles.modeButtonText,
+                        mode === 'new' && styles.modeButtonTextActive,
+                      ]}
+                    >
+                      New {inventoryType === 'part' ? 'Part' : 'Vehicle'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
 
               {mode === 'existing' ? (
                 <View style={styles.formGroup}>
                   <Text style={styles.label}>
-                    Select {inventoryType === 'part' ? 'Part' : 'Vehicle'}
+                    {hasPresetItem
+                      ? 'Selected Item'
+                      : `Select ${inventoryType === 'part' ? 'Part' : 'Vehicle'}`}
                   </Text>
 
-                  <View style={styles.searchContainer}>
-                    <Text style={styles.searchIcon}>🔍</Text>
-
-                    <TextInput
-                      style={styles.searchInput}
-                      value={searchQuery}
-                      onChangeText={setSearchQuery}
-                      placeholder={
-                        inventoryType === 'part'
-                          ? 'Search by name, part number, or specs...'
-                          : 'Search by model, chassis, or specs...'
-                      }
-                      placeholderTextColor="#64748b"
-                    />
-
-                    {searchQuery !== '' && (
-                      <TouchableOpacity onPress={() => setSearchQuery('')}>
-                        <Text style={styles.clearIcon}>✕</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-
-                  <View style={styles.itemListContainer}>
-                    {filteredItems.length === 0 ? (
-                      <Text style={styles.emptyText}>
-                        No {inventoryType === 'part' ? 'parts' : 'vehicles'} found.
+                  {hasPresetItem ? (
+                    <View style={styles.lockedSelectedItemBox}>
+                      <Text style={styles.lockedSelectedItemName}>
+                        {selectedItemName}
                       </Text>
-                    ) : (
-                      filteredItems.map(renderSelectableItem)
-                    )}
-                  </View>
+
+                      <Text style={styles.lockedSelectedItemSub}>
+                        {selectedItemSubText}
+                      </Text>
+                    </View>
+                  ) : (
+                    <>
+                      <View style={styles.searchContainer}>
+                        <Text style={styles.searchIcon}>🔍</Text>
+
+                        <TextInput
+                          style={styles.searchInput}
+                          value={searchQuery}
+                          onChangeText={setSearchQuery}
+                          placeholder={
+                            inventoryType === 'part'
+                              ? 'Search by name, part number, or specs...'
+                              : 'Search by model, chassis, or specs...'
+                          }
+                          placeholderTextColor="#64748b"
+                        />
+
+                        {searchQuery !== '' && (
+                          <TouchableOpacity onPress={() => setSearchQuery('')}>
+                            <Text style={styles.clearIcon}>✕</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+
+                      <View style={styles.itemListContainer}>
+                        {filteredItems.length === 0 ? (
+                          <Text style={styles.emptyText}>
+                            No {inventoryType === 'part' ? 'parts' : 'vehicles'}{' '}
+                            found.
+                          </Text>
+                        ) : (
+                          filteredItems.map(renderSelectableItem)
+                        )}
+                      </View>
+                    </>
+                  )}
                 </View>
               ) : inventoryType === 'part' ? (
                 <>
@@ -690,7 +758,8 @@ export default function AddStockModal({
 
                   <View style={styles.noteContainer}>
                     <Text style={styles.noteText}>
-                      ℹ️ One vehicle unit will be added with the chassis number above.
+                      ℹ️ One vehicle unit will be added with the chassis number
+                      above.
                     </Text>
                   </View>
                 </>
@@ -708,7 +777,9 @@ export default function AddStockModal({
                   <TextInput
                     style={styles.input}
                     value={quantity}
-                    onChangeText={(text) => setQuantity(text.replace(/[^0-9]/g, ''))}
+                    onChangeText={(text) =>
+                      setQuantity(text.replace(/[^0-9]/g, ''))
+                    }
                     placeholder="Enter quantity"
                     placeholderTextColor="#64748b"
                     keyboardType="numeric"
@@ -739,7 +810,8 @@ export default function AddStockModal({
                   {inventoryType === 'part' && selectedPart && quantity ? (
                     <Text style={styles.previewText}>
                       {selectedPart.name}: {selectedPart.quantity} →{' '}
-                      {selectedPart.quantity + (parseInt(quantity, 10) || 0)} units
+                      {selectedPart.quantity + (parseInt(quantity, 10) || 0)}{' '}
+                      units
                     </Text>
                   ) : null}
 
@@ -775,7 +847,8 @@ export default function AddStockModal({
                 <TouchableOpacity
                   style={[
                     styles.submitButton,
-                    (loading || !canManageInventory) && styles.submitButtonDisabled,
+                    (loading || !canManageInventory) &&
+                      styles.submitButtonDisabled,
                   ]}
                   onPress={handleSubmit}
                   disabled={loading || !canManageInventory}
@@ -859,6 +932,37 @@ const styles = StyleSheet.create({
     color: '#fca5a5',
     fontSize: 13,
     lineHeight: 18,
+  },
+  lockedItemNotice: {
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.35)',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 14,
+  },
+  lockedItemNoticeText: {
+    color: '#ffffff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  lockedSelectedItemBox: {
+    backgroundColor: '#0f172a',
+    borderWidth: 1,
+    borderColor: '#334155',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 14,
+  },
+  lockedSelectedItemName: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  lockedSelectedItemSub: {
+    color: '#94a3b8',
+    fontSize: 12,
   },
   typeToggle: {
     flexDirection: 'row',
