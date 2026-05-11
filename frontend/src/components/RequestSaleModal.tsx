@@ -111,6 +111,11 @@ export default function RequestSaleModal({
   const remainingAmount = Math.max(0, totalAmount - paidAmount);
   const isFullyPaid = totalAmount > 0 && paidAmount >= totalAmount;
 
+  const fullPaymentActionText =
+    itemType === 'vehicle'
+      ? 'This vehicle request will go to admin approval.'
+      : 'This part sale will be completed automatically.';
+
   const customersForDisplay = allCustomers.length > 0 ? allCustomers : customers;
 
   const filteredCustomers = useMemo(() => {
@@ -297,6 +302,11 @@ export default function RequestSaleModal({
       return false;
     }
 
+    if (paymentMethod !== 'cash' && !bankName.trim()) {
+      Alert.alert('Error', 'Bank name is required for non-cash payments');
+      return false;
+    }
+
     if (paymentMethod !== 'cash' && !referenceNumber.trim()) {
       Alert.alert('Error', 'Reference number is required for non-cash payments');
       return false;
@@ -379,13 +389,18 @@ export default function RequestSaleModal({
 
       console.log('Creating sales order payload:', JSON.stringify(payload));
 
-      await salesApi.createSalesOrder(payload);
+      const response = await salesApi.createSalesOrder(payload);
 
       Alert.alert(
         'Success',
-        isFullyPaid
-          ? 'Sale request submitted for admin approval'
-          : `Sale request saved. Remaining amount: ${formatMoney(remainingAmount)}`
+        response.data?.message ||
+          (isFullyPaid
+            ? itemType === 'vehicle'
+              ? 'Vehicle sale request submitted for admin approval'
+              : 'Part sale completed automatically'
+            : `Sale request saved. Remaining amount: ${formatMoney(
+                remainingAmount
+              )}`)
       );
 
       resetForm();
@@ -458,7 +473,9 @@ export default function RequestSaleModal({
                   ) : null}
 
                   {item.chassis_number ? (
-                    <Text style={styles.itemCode}>Chassis: {item.chassis_number}</Text>
+                    <Text style={styles.itemCode}>
+                      Chassis: {item.chassis_number}
+                    </Text>
                   ) : null}
 
                   {item.part_number ? (
@@ -517,14 +534,16 @@ export default function RequestSaleModal({
                       <TouchableOpacity
                         style={[
                           styles.customerModeButton,
-                          !showNewCustomerForm && styles.customerModeButtonActive,
+                          !showNewCustomerForm &&
+                            styles.customerModeButtonActive,
                         ]}
                         onPress={() => setShowNewCustomerForm(false)}
                       >
                         <Text
                           style={[
                             styles.customerModeText,
-                            !showNewCustomerForm && styles.customerModeTextActive,
+                            !showNewCustomerForm &&
+                              styles.customerModeTextActive,
                           ]}
                         >
                           Existing
@@ -534,14 +553,16 @@ export default function RequestSaleModal({
                       <TouchableOpacity
                         style={[
                           styles.customerModeButton,
-                          showNewCustomerForm && styles.customerModeButtonActive,
+                          showNewCustomerForm &&
+                            styles.customerModeButtonActive,
                         ]}
                         onPress={() => setShowNewCustomerForm(true)}
                       >
                         <Text
                           style={[
                             styles.customerModeText,
-                            showNewCustomerForm && styles.customerModeTextActive,
+                            showNewCustomerForm &&
+                              styles.customerModeTextActive,
                           ]}
                         >
                           New Customer
@@ -562,11 +583,15 @@ export default function RequestSaleModal({
                         {loadingCustomers ? (
                           <View style={styles.smallLoadingBox}>
                             <ActivityIndicator size="small" color="#ef4444" />
-                            <Text style={styles.smallLoadingText}>Loading customers...</Text>
+                            <Text style={styles.smallLoadingText}>
+                              Loading customers...
+                            </Text>
                           </View>
                         ) : filteredCustomers.length === 0 ? (
                           <View style={styles.emptyCustomerBox}>
-                            <Text style={styles.emptyCustomerText}>No customers found</Text>
+                            <Text style={styles.emptyCustomerText}>
+                              No customers found
+                            </Text>
 
                             <TouchableOpacity
                               style={styles.createCustomerInlineButton}
@@ -596,8 +621,12 @@ export default function RequestSaleModal({
                                     {customer.full_name}
                                   </Text>
 
-                                  <Text style={styles.customerOptionSub} numberOfLines={1}>
-                                    {customer.phone || 'No phone'} • {customer.email || 'No email'}
+                                  <Text
+                                    style={styles.customerOptionSub}
+                                    numberOfLines={1}
+                                  >
+                                    {customer.phone || 'No phone'} •{' '}
+                                    {customer.email || 'No email'}
                                   </Text>
                                 </TouchableOpacity>
                               ))}
@@ -679,14 +708,18 @@ export default function RequestSaleModal({
                 <View style={styles.totalBox}>
                   <View>
                     <Text style={styles.totalLabel}>Total Amount</Text>
-                    <Text style={styles.totalValue}>{formatMoney(totalAmount)}</Text>
+                    <Text style={styles.totalValue}>
+                      {formatMoney(totalAmount)}
+                    </Text>
                   </View>
 
                   <View style={styles.statusBox}>
                     <Text
                       style={[
                         styles.statusText,
-                        isFullyPaid ? styles.fullyPaidText : styles.partialPaidText,
+                        isFullyPaid
+                          ? styles.fullyPaidText
+                          : styles.partialPaidText,
                       ]}
                     >
                       {isFullyPaid ? 'Full Payment' : 'Partial Payment'}
@@ -748,14 +781,18 @@ export default function RequestSaleModal({
                       key={method.value}
                       style={[
                         styles.methodButton,
-                        paymentMethod === method.value && styles.methodButtonActive,
+                        paymentMethod === method.value &&
+                          styles.methodButtonActive,
                       ]}
-                      onPress={() => setPaymentMethod(method.value as PaymentMethod)}
+                      onPress={() =>
+                        setPaymentMethod(method.value as PaymentMethod)
+                      }
                     >
                       <Text
                         style={[
                           styles.methodText,
-                          paymentMethod === method.value && styles.methodTextActive,
+                          paymentMethod === method.value &&
+                            styles.methodTextActive,
                         ]}
                       >
                         {method.label}
@@ -766,7 +803,7 @@ export default function RequestSaleModal({
 
                 {paymentMethod !== 'cash' ? (
                   <>
-                    <Text style={styles.inputLabel}>Bank Name</Text>
+                    <Text style={styles.inputLabel}>Bank Name *</Text>
                     <TextInput
                       style={styles.input}
                       placeholder="Bank name"
@@ -803,7 +840,9 @@ export default function RequestSaleModal({
 
                 <View style={styles.paymentSummaryBox}>
                   <View style={styles.paymentSummaryRow}>
-                    <Text style={styles.paymentSummaryLabel}>Paid / Submitted</Text>
+                    <Text style={styles.paymentSummaryLabel}>
+                      Paid / Submitted
+                    </Text>
                     <Text style={styles.paymentSummaryPaid}>
                       {formatMoney(paidAmount)}
                     </Text>
@@ -817,13 +856,15 @@ export default function RequestSaleModal({
                         remainingAmount === 0 && styles.paymentSummaryPaid,
                       ]}
                     >
-                      {remainingAmount > 0 ? formatMoney(remainingAmount) : 'Fully paid'}
+                      {remainingAmount > 0
+                        ? formatMoney(remainingAmount)
+                        : 'Fully paid'}
                     </Text>
                   </View>
 
                   <Text style={styles.paymentSummaryNote}>
                     {isFullyPaid
-                      ? 'This request will go to admin approval.'
+                      ? fullPaymentActionText
                       : 'This request will stay pending payment and reserve the item.'}
                   </Text>
                 </View>
