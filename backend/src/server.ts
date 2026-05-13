@@ -11,12 +11,29 @@ import salesRoutes from './routes/salesRoutes';
 import paymentRoutes from './routes/paymentRoutes';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Beast Vehicles API is running',
+    endpoints: {
+      health: '/health',
+      test: '/api/test',
+      auth: '/api/auth',
+      inventory: '/api/inventory',
+      customers: '/api/customers',
+      sales: '/api/sales',
+      payments: '/api/payments',
+    },
+  });
+});
 
 // Health check
 app.get('/health', (req, res) => {
@@ -48,14 +65,14 @@ app.all('*', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`🧪 Test API: http://localhost:${PORT}/api/test`);
-  console.log(`🔐 Auth API: http://localhost:${PORT}/api/auth`);
-  console.log(`🔧 Vehicles API: http://localhost:${PORT}/api/inventory/vehicles`);
-  console.log(`🔧 Parts API: http://localhost:${PORT}/api/inventory/parts`);
-  console.log(`👥 Customers API: http://localhost:${PORT}/api/customers`);
-  console.log(`📦 Sales Orders API: http://localhost:${PORT}/api/sales`);
-  console.log(`💰 Payments API: http://localhost:${PORT}/api/payments`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📊 Health check: /health`);
+  console.log(`🧪 Test API: /api/test`);
+  console.log(`🔐 Auth API: /api/auth`);
+  console.log(`🔧 Vehicles API: /api/inventory/vehicles`);
+  console.log(`🔧 Parts API: /api/inventory/parts`);
+  console.log(`👥 Customers API: /api/customers`);
+  console.log(`📦 Sales Orders API: /api/sales`);
+  console.log(`💰 Payments API: /api/payments`);
 });
