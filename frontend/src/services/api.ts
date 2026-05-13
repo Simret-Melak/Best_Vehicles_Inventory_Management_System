@@ -3,7 +3,7 @@ import axios from 'axios';
 // For iOS Simulator: http://localhost:3000
 // For Android Emulator: http://10.0.2.2:3000
 // For Physical Device: http://YOUR_IP_ADDRESS:3000
-const API_BASE_URL = 'http://192.168.8.68:3000/api';
+const API_BASE_URL = 'http://192.168.1.111:3000/api';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -36,6 +36,20 @@ export const authApi = {
 
   getMe: () => api.get('/auth/me'),
 
+  forgotPassword: (email: string) =>
+    api.post('/auth/forgot-password', { email }),
+
+  updatePassword: (
+    current_password: string,
+    new_password: string,
+    confirm_password: string
+  ) =>
+    api.put('/auth/me/password', {
+      current_password,
+      new_password,
+      confirm_password,
+    }),
+
   createUser: (data: {
     full_name: string;
     email: string;
@@ -55,6 +69,8 @@ export const authApi = {
 
   resetUserPassword: (id: string, password: string) =>
     api.put(`/auth/users/${id}/password`, { password }),
+
+  deleteUser: (id: string) => api.delete(`/auth/users/${id}`),
 };
 
 // ============================================
@@ -149,7 +165,6 @@ export const customerApi = {
 // ============================================
 // SALES ORDER API
 // ============================================
-
 export const salesApi = {
   getSalesOrders: (params?: { status?: string; customer_id?: string }) =>
     api.get('/sales', { params }),
@@ -158,7 +173,6 @@ export const salesApi = {
 
   createSalesOrder: (data: any) => api.post('/sales', data),
 
-  // Worker edits sale request before admin approval
   updateSaleRequest: (id: string, data: any) =>
     api.put(`/sales/${id}/request`, data),
 

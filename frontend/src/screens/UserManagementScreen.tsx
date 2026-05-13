@@ -119,7 +119,8 @@ const CreateUserModal = ({
 }) => {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [temporaryPassword, setTemporaryPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [role, setRole] = useState<UserRole>('worker');
   const [submitting, setSubmitting] = useState(false);
 
@@ -127,11 +128,27 @@ const CreateUserModal = ({
     if (visible) {
       setFullName('');
       setEmail('');
-      setPassword('');
+      setTemporaryPassword('');
+      setShowPassword(false);
       setRole('worker');
       setSubmitting(false);
     }
   }, [visible]);
+
+  const generateTemporaryPassword = () => {
+    const randomNumber = Math.floor(10000 + Math.random() * 90000);
+    const prefix =
+      role === 'admin'
+        ? 'Admin'
+        : role === 'store_manager'
+          ? 'Store'
+          : role === 'super_admin'
+            ? 'Super'
+            : 'Worker';
+
+    setTemporaryPassword(`${prefix}@${randomNumber}`);
+    setShowPassword(true);
+  };
 
   const handleCreate = async () => {
     if (!fullName.trim()) {
@@ -144,8 +161,8 @@ const CreateUserModal = ({
       return;
     }
 
-    if (!password || password.length < 6) {
-      Alert.alert('Error', 'Password must be at least 6 characters');
+    if (!temporaryPassword || temporaryPassword.length < 6) {
+      Alert.alert('Error', 'Temporary password must be at least 6 characters');
       return;
     }
 
@@ -155,11 +172,15 @@ const CreateUserModal = ({
       await authApi.createUser({
         full_name: fullName.trim(),
         email: email.trim().toLowerCase(),
-        password,
+        password: temporaryPassword,
         role,
       });
 
-      Alert.alert('Success', `${roleLabels[role]} user created successfully`);
+      Alert.alert(
+        'User Created',
+        `${roleLabels[role]} account has been created.\n\nTemporary password:\n${temporaryPassword}\n\nGive this password to the user and ask them to change it after login.`
+      );
+
       onCreated();
       onClose();
     } catch (error: any) {
@@ -189,7 +210,7 @@ const CreateUserModal = ({
             <View>
               <Text style={styles.modalTitle}>Create User</Text>
               <Text style={styles.modalSubtitle}>
-                Add a new staff account
+                Create a staff account with a temporary password
               </Text>
             </View>
 
@@ -212,7 +233,7 @@ const CreateUserModal = ({
             <Text style={styles.inputLabel}>Email</Text>
             <TextInput
               style={styles.input}
-              placeholder="Enter email"
+              placeholder="Enter email address"
               placeholderTextColor="#64748b"
               value={email}
               onChangeText={setEmail}
@@ -223,15 +244,47 @@ const CreateUserModal = ({
             />
 
             <Text style={styles.inputLabel}>Temporary Password</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Minimum 6 characters"
-              placeholderTextColor="#64748b"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-              editable={!submitting}
-            />
+            <View style={styles.passwordContainer}>
+              <TextInput
+                style={styles.passwordInput}
+                placeholder="Enter temporary password"
+                placeholderTextColor="#64748b"
+                value={temporaryPassword}
+                onChangeText={setTemporaryPassword}
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!submitting}
+              />
+
+              <TouchableOpacity
+                style={styles.showPasswordButton}
+                onPress={() => setShowPassword((prev) => !prev)}
+                disabled={submitting}
+              >
+                <Text style={styles.showPasswordText}>
+                  {showPassword ? 'Hide' : 'Show'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity
+              style={styles.generatePasswordButton}
+              onPress={generateTemporaryPassword}
+              disabled={submitting}
+            >
+              <Text style={styles.generatePasswordText}>
+                Generate Temporary Password
+              </Text>
+            </TouchableOpacity>
+
+            <View style={styles.passwordInfoBox}>
+              <Text style={styles.passwordInfoTitle}>Temporary Password</Text>
+              <Text style={styles.passwordInfoText}>
+                Give this password to the user privately. After logging in, they
+                should use Change Password to set their own password.
+              </Text>
+            </View>
 
             <Text style={styles.inputLabel}>Role</Text>
             <View style={styles.roleGrid}>
@@ -290,11 +343,13 @@ const ResetPasswordModal = ({
   onClose: () => void;
 }) => {
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (visible) {
       setPassword('');
+      setShowPassword(false);
       setSubmitting(false);
     }
   }, [visible]);
@@ -350,15 +405,29 @@ const ResetPasswordModal = ({
           </View>
 
           <Text style={styles.inputLabel}>New Password</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Minimum 6 characters"
-            placeholderTextColor="#64748b"
-            value={password}
-            onChangeText={setPassword}
-            secureTextEntry
-            editable={!submitting}
-          />
+          <View style={styles.passwordContainer}>
+            <TextInput
+              style={styles.passwordInput}
+              placeholder="Minimum 6 characters"
+              placeholderTextColor="#64748b"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry={!showPassword}
+              editable={!submitting}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+
+            <TouchableOpacity
+              style={styles.showPasswordButton}
+              onPress={() => setShowPassword((prev) => !prev)}
+              disabled={submitting}
+            >
+              <Text style={styles.showPasswordText}>
+                {showPassword ? 'Hide' : 'Show'}
+              </Text>
+            </TouchableOpacity>
+          </View>
 
           <View style={styles.modalButtons}>
             <TouchableOpacity
@@ -393,6 +462,7 @@ const UserCard = ({
   onToggleStatus,
   onChangeRole,
   onResetPassword,
+  onDeleteUser,
   processingId,
 }: {
   user: UserProfile;
@@ -400,6 +470,7 @@ const UserCard = ({
   onToggleStatus: (user: UserProfile) => void;
   onChangeRole: (user: UserProfile, role: UserRole) => void;
   onResetPassword: (user: UserProfile) => void;
+  onDeleteUser: (user: UserProfile) => void;
   processingId: string | null;
 }) => {
   const isSelf = user.id === currentUserId;
@@ -475,7 +546,7 @@ const UserCard = ({
 
         {isSelf ? (
           <Text style={styles.selfNote}>
-            You cannot change your own role or disable yourself.
+            You cannot change your own role, disable yourself, or delete yourself.
           </Text>
         ) : null}
       </View>
@@ -510,6 +581,17 @@ const UserCard = ({
               {user.is_active ? 'Disable' : 'Enable'}
             </Text>
           )}
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[
+            styles.deleteButton,
+            (isProcessing || isSelf) && styles.disabledButton,
+          ]}
+          onPress={() => onDeleteUser(user)}
+          disabled={isProcessing || isSelf}
+        >
+          <Text style={styles.deleteButtonText}>Delete</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -641,6 +723,54 @@ export default function UserManagementScreen() {
     setResetModalVisible(true);
   };
 
+  const handleDeleteUser = (targetUser: UserProfile) => {
+    if (targetUser.id === currentUser?.id) {
+      Alert.alert('Error', 'You cannot delete your own account');
+      return;
+    }
+
+    Alert.alert(
+      'Delete User',
+      `Are you sure you want to permanently delete ${targetUser.full_name}? This cannot be undone.`,
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setProcessingId(targetUser.id);
+
+            try {
+              await authApi.deleteUser(targetUser.id);
+              await loadUsers();
+
+              Alert.alert(
+                'Deleted',
+                `${targetUser.full_name} has been deleted`
+              );
+            } catch (error: any) {
+              console.error('Delete user error:', {
+                status: error.response?.status,
+                data: error.response?.data,
+                url: error.config?.url,
+              });
+
+              Alert.alert(
+                'Error',
+                error.response?.data?.error || 'Failed to delete user'
+              );
+            } finally {
+              setProcessingId(null);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const filteredUsers = users.filter((u) => {
     const query = search.toLowerCase().trim();
 
@@ -748,6 +878,7 @@ export default function UserManagementScreen() {
             onToggleStatus={handleToggleStatus}
             onChangeRole={handleChangeRole}
             onResetPassword={handleResetPassword}
+            onDeleteUser={handleDeleteUser}
             processingId={processingId}
           />
         )}
@@ -1005,7 +1136,7 @@ const styles = StyleSheet.create({
   },
   cardActions: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
   },
   resetButton: {
     flex: 1,
@@ -1016,7 +1147,7 @@ const styles = StyleSheet.create({
   },
   resetButtonText: {
     color: '#ffffff',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
   },
   disableButton: {
@@ -1030,7 +1161,7 @@ const styles = StyleSheet.create({
   },
   disableButtonText: {
     color: '#ef4444',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
   },
   enableButton: {
@@ -1042,7 +1173,21 @@ const styles = StyleSheet.create({
   },
   enableButtonText: {
     color: '#ffffff',
-    fontSize: 12,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  deleteButton: {
+    flex: 1,
+    backgroundColor: 'rgba(239, 68, 68, 0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.45)',
+    paddingVertical: 9,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  deleteButtonText: {
+    color: '#fca5a5',
+    fontSize: 11,
     fontWeight: '700',
   },
   disabledButton: {
@@ -1113,6 +1258,64 @@ const styles = StyleSheet.create({
     borderColor: '#334155',
     fontSize: 14,
     marginBottom: 14,
+  },
+  passwordContainer: {
+    backgroundColor: '#0f172a',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#334155',
+    marginBottom: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  passwordInput: {
+    flex: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    color: '#ffffff',
+    fontSize: 14,
+  },
+  showPasswordButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+  },
+  showPasswordText: {
+    color: '#ef4444',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  generatePasswordButton: {
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.35)',
+    borderRadius: 8,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  generatePasswordText: {
+    color: '#60a5fa',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  passwordInfoBox: {
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.3)',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  passwordInfoTitle: {
+    color: '#60a5fa',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  passwordInfoText: {
+    color: '#94a3b8',
+    fontSize: 12,
+    lineHeight: 17,
   },
   roleInfoBox: {
     backgroundColor: '#0f172a',

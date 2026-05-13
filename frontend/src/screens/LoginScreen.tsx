@@ -13,6 +13,7 @@ import {
   Image,
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
+import ForgotPasswordModal from '../components/ForgotPasswordModal';
 
 export default function LoginScreen() {
   const { login } = useAuth();
@@ -21,6 +22,7 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [forgotPasswordVisible, setForgotPasswordVisible] = useState(false);
 
   const handleLogin = async () => {
     if (!email.trim()) {
@@ -42,14 +44,28 @@ export default function LoginScreen() {
       // App.tsx will automatically open the correct dashboard based on user.role.
     } catch (error: any) {
       console.error('Login error:', {
+        message: error.message,
+        code: error.code,
         status: error.response?.status,
         data: error.response?.data,
         url: error.config?.url,
+        baseURL: error.config?.baseURL,
+        method: error.config?.method,
+        timeout: error.config?.timeout,
+        hasResponse: !!error.response,
+        hasRequest: !!error.request,
       });
+
+      const isNetworkError =
+        !error.response ||
+        error.message === 'Network Error' ||
+        error.code === 'ECONNABORTED';
 
       Alert.alert(
         'Login Failed',
-        error.response?.data?.error || 'Invalid email or password'
+        isNetworkError
+          ? 'Cannot reach the server. Please check your internet connection, backend server, and API URL.'
+          : error.response?.data?.error || 'Invalid email or password'
       );
     } finally {
       setSubmitting(false);
@@ -69,6 +85,7 @@ export default function LoginScreen() {
           style={styles.logoImage}
           resizeMode="contain"
         />
+
         <Text style={styles.appTitle}>Best Vehicles</Text>
         <Text style={styles.appSubtitle}>Inventory & Sales Management</Text>
       </View>
@@ -107,12 +124,21 @@ export default function LoginScreen() {
           <TouchableOpacity
             style={styles.showPasswordButton}
             onPress={() => setShowPassword((prev) => !prev)}
+            disabled={submitting}
           >
             <Text style={styles.showPasswordText}>
               {showPassword ? 'Hide' : 'Show'}
             </Text>
           </TouchableOpacity>
         </View>
+
+        <TouchableOpacity
+          style={styles.forgotPasswordButton}
+          onPress={() => setForgotPasswordVisible(true)}
+          disabled={submitting}
+        >
+          <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
+        </TouchableOpacity>
 
         <TouchableOpacity
           style={[styles.loginButton, submitting && styles.disabledButton]}
@@ -130,6 +156,11 @@ export default function LoginScreen() {
       <Text style={styles.footerText}>
         Accounts are created by the super admin.
       </Text>
+
+      <ForgotPasswordModal
+        visible={forgotPasswordVisible}
+        onClose={() => setForgotPasswordVisible(false)}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -202,7 +233,7 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#334155',
-    marginBottom: 20,
+    marginBottom: 10,
     flexDirection: 'row',
     alignItems: 'center',
   },
@@ -220,6 +251,15 @@ const styles = StyleSheet.create({
   showPasswordText: {
     color: '#ef4444',
     fontSize: 12,
+    fontWeight: '700',
+  },
+  forgotPasswordButton: {
+    alignSelf: 'flex-end',
+    marginBottom: 18,
+  },
+  forgotPasswordText: {
+    color: '#ef4444',
+    fontSize: 13,
     fontWeight: '700',
   },
   loginButton: {

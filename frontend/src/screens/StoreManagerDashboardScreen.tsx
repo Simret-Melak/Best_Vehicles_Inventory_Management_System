@@ -10,12 +10,14 @@ import {
   RefreshControl,
   ActivityIndicator,
   Alert,
+  Modal,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { inventoryApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import AddStockModal from '../components/AddStockModal';
 import ItemHistoryModal from '../components/ItemHistoryModal';
+import ChangePasswordModal from '../components/ChangePasswordModal';
 
 interface InventoryItem {
   id: string;
@@ -131,7 +133,9 @@ const InventoryCard = ({
 
         <View style={styles.stockPill}>
           <Text style={styles.stockPillLabel}>Price</Text>
-          <Text style={styles.stockPillValue}>{formatMoney(item.unit_price)}</Text>
+          <Text style={styles.stockPillValue}>
+            {formatMoney(item.unit_price)}
+          </Text>
         </View>
       </View>
 
@@ -175,6 +179,9 @@ export default function StoreManagerDashboardScreen() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  const [profileMenuVisible, setProfileMenuVisible] = useState(false);
+  const [changePasswordVisible, setChangePasswordVisible] = useState(false);
 
   const [addStockModalVisible, setAddStockModalVisible] = useState(false);
   const [historyModalVisible, setHistoryModalVisible] = useState(false);
@@ -277,6 +284,11 @@ export default function StoreManagerDashboardScreen() {
     ]);
   };
 
+  const handleOpenChangePassword = () => {
+    setProfileMenuVisible(false);
+    setChangePasswordVisible(true);
+  };
+
   const handleAddStockSuccess = async () => {
     await loadInventory();
   };
@@ -286,9 +298,10 @@ export default function StoreManagerDashboardScreen() {
       id: item.id,
       name: item.name,
       type: item.type,
-      sku: item.type === 'vehicle'
-        ? item.chassis_number || item.id
-        : item.part_number || item.id,
+      sku:
+        item.type === 'vehicle'
+          ? item.chassis_number || item.id
+          : item.part_number || item.id,
       current_quantity:
         item.type === 'vehicle'
           ? item.status === 'available'
@@ -376,15 +389,18 @@ export default function StoreManagerDashboardScreen() {
 
       <View style={styles.header}>
         <View style={styles.headerTopRow}>
-          <View>
+          <View style={styles.headerTextContainer}>
             <Text style={styles.headerTitle}>Store Manager</Text>
             <Text style={styles.headerSubtitle}>
               {user?.full_name || 'Store Manager'} • Stock Control
             </Text>
           </View>
 
-          <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-            <Text style={styles.logoutButtonText}>Logout</Text>
+          <TouchableOpacity
+            style={styles.profileButton}
+            onPress={() => setProfileMenuVisible(true)}
+          >
+            <Text style={styles.profileButtonText}>Profile</Text>
           </TouchableOpacity>
         </View>
 
@@ -490,6 +506,51 @@ export default function StoreManagerDashboardScreen() {
         }}
         item={selectedHistoryItem}
       />
+
+      <Modal
+        visible={profileMenuVisible}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setProfileMenuVisible(false)}
+      >
+        <View style={styles.profileOverlay}>
+          <TouchableOpacity
+            style={styles.profileBackdrop}
+            activeOpacity={1}
+            onPress={() => setProfileMenuVisible(false)}
+          />
+
+          <View style={styles.profileMenu}>
+            <View style={styles.profileHeader}>
+              <Text style={styles.profileName}>{user?.full_name || 'User'}</Text>
+              <Text style={styles.profileEmail}>{user?.email}</Text>
+              <Text style={styles.profileRole}>{user?.role}</Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.profileMenuItem}
+              onPress={handleOpenChangePassword}
+            >
+              <Text style={styles.profileMenuItemText}>🔐 Change Password</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.profileMenuItem, styles.profileLogoutItem]}
+              onPress={() => {
+                setProfileMenuVisible(false);
+                handleLogout();
+              }}
+            >
+              <Text style={styles.profileLogoutText}>Logout</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <ChangePasswordModal
+        visible={changePasswordVisible}
+        onClose={() => setChangePasswordVisible(false)}
+      />
     </View>
   );
 }
@@ -519,6 +580,9 @@ const styles = StyleSheet.create({
     gap: 12,
     marginBottom: 16,
   },
+  headerTextContainer: {
+    flex: 1,
+  },
   headerTitle: {
     fontSize: 30,
     fontWeight: 'bold',
@@ -529,17 +593,81 @@ const styles = StyleSheet.create({
     color: '#94a3b8',
     marginTop: 4,
   },
-  logoutButton: {
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+  profileButton: {
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.35)',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.35)',
   },
-  logoutButtonText: {
-    color: '#ef4444',
+  profileButtonText: {
+    color: '#60a5fa',
     fontSize: 12,
+    fontWeight: '700',
+  },
+  profileOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    alignItems: 'flex-end',
+    paddingTop: 88,
+    paddingRight: 20,
+  },
+  profileBackdrop: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  profileMenu: {
+    width: 260,
+    backgroundColor: '#1e293b',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 14,
+  },
+  profileHeader: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#334155',
+    paddingBottom: 12,
+    marginBottom: 8,
+  },
+  profileName: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 3,
+  },
+  profileEmail: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginBottom: 3,
+  },
+  profileRole: {
+    color: '#64748b',
+    fontSize: 11,
+    textTransform: 'uppercase',
+  },
+  profileMenuItem: {
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  profileMenuItemText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  profileLogoutItem: {
+    marginTop: 4,
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  profileLogoutText: {
+    color: '#ef4444',
+    fontSize: 14,
     fontWeight: '700',
   },
   summaryRow: {

@@ -11,12 +11,14 @@ import {
   Alert,
   ActivityIndicator,
   ScrollView,
+  Modal,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import AddStockModal from '../components/AddStockModal';
 import RequestSaleModal from '../components/RequestSaleModal';
 import ItemHistoryModal from '../components/ItemHistoryModal';
 import EditItemModal from '../components/EditItemModal';
+import ChangePasswordModal from '../components/ChangePasswordModal';
 import { inventoryApi } from '../services/api';
 import { useAuth } from '../context/AuthContext';
 
@@ -163,6 +165,9 @@ export default function WorkerDashboardScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  const [profileMenuVisible, setProfileMenuVisible] = useState(false);
+  const [changePasswordVisible, setChangePasswordVisible] = useState(false);
+
   const [addStockModalVisible, setAddStockModalVisible] = useState(false);
   const [addStockSelectedItem, setAddStockSelectedItem] =
     useState<InventoryItem | null>(null);
@@ -263,6 +268,11 @@ export default function WorkerDashboardScreen() {
         onPress: logout,
       },
     ]);
+  };
+
+  const handleOpenChangePassword = () => {
+    setProfileMenuVisible(false);
+    setChangePasswordVisible(true);
   };
 
   const openAddStockModal = (item: InventoryItem | null = null) => {
@@ -399,8 +409,11 @@ export default function WorkerDashboardScreen() {
             </Text>
           </View>
 
-          <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-            <Text style={styles.logoutButtonText}>Logout</Text>
+          <TouchableOpacity
+            style={styles.profileButton}
+            onPress={() => setProfileMenuVisible(true)}
+          >
+            <Text style={styles.profileButtonText}>Profile</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -574,6 +587,51 @@ export default function WorkerDashboardScreen() {
         itemType={editSelectedItem ? determineItemType(editSelectedItem) : 'part'}
         onSuccess={handleEditItemSuccess}
       />
+
+      <Modal
+        visible={profileMenuVisible}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setProfileMenuVisible(false)}
+      >
+        <View style={styles.profileOverlay}>
+          <TouchableOpacity
+            style={styles.profileBackdrop}
+            activeOpacity={1}
+            onPress={() => setProfileMenuVisible(false)}
+          />
+
+          <View style={styles.profileMenu}>
+            <View style={styles.profileHeader}>
+              <Text style={styles.profileName}>{user?.full_name || 'User'}</Text>
+              <Text style={styles.profileEmail}>{user?.email}</Text>
+              <Text style={styles.profileRole}>{user?.role}</Text>
+            </View>
+
+            <TouchableOpacity
+              style={styles.profileMenuItem}
+              onPress={handleOpenChangePassword}
+            >
+              <Text style={styles.profileMenuItemText}>🔐 Change Password</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.profileMenuItem, styles.profileLogoutItem]}
+              onPress={() => {
+                setProfileMenuVisible(false);
+                handleLogout();
+              }}
+            >
+              <Text style={styles.profileLogoutText}>Logout</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <ChangePasswordModal
+        visible={changePasswordVisible}
+        onClose={() => setChangePasswordVisible(false)}
+      />
     </View>
   );
 }
@@ -619,17 +677,81 @@ const styles = StyleSheet.create({
     marginTop: 4,
     maxWidth: 240,
   },
-  logoutButton: {
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+  profileButton: {
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
     borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.35)',
+    borderColor: 'rgba(59, 130, 246, 0.35)',
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
   },
-  logoutButtonText: {
-    color: '#ef4444',
+  profileButtonText: {
+    color: '#60a5fa',
     fontSize: 12,
+    fontWeight: '700',
+  },
+  profileOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    alignItems: 'flex-end',
+    paddingTop: 88,
+    paddingRight: 20,
+  },
+  profileBackdrop: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+  },
+  profileMenu: {
+    width: 260,
+    backgroundColor: '#1e293b',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#334155',
+    padding: 14,
+  },
+  profileHeader: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#334155',
+    paddingBottom: 12,
+    marginBottom: 8,
+  },
+  profileName: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 3,
+  },
+  profileEmail: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginBottom: 3,
+  },
+  profileRole: {
+    color: '#64748b',
+    fontSize: 11,
+    textTransform: 'uppercase',
+  },
+  profileMenuItem: {
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  profileMenuItemText: {
+    color: '#ffffff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  profileLogoutItem: {
+    marginTop: 4,
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    paddingHorizontal: 12,
+    alignItems: 'center',
+  },
+  profileLogoutText: {
+    color: '#ef4444',
+    fontSize: 14,
     fontWeight: '700',
   },
   tabBarWrapper: {
