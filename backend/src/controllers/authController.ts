@@ -28,6 +28,10 @@ const requireSuperAdmin = (req: AuthenticatedRequest, res: Response) => {
   return true;
 };
 
+// ============================================
+// LOGIN
+// ============================================
+
 export const login = async (req: any, res: Response) => {
   try {
     const { email, password } = req.body;
@@ -102,12 +106,195 @@ export const login = async (req: any, res: Response) => {
   }
 };
 
+// ============================================
+// GET CURRENT USER
+// ============================================
+
 export const getMe = async (req: AuthenticatedRequest, res: Response) => {
   return res.json({
     success: true,
     data: req.user,
   });
 };
+
+// ============================================
+// FORGOT PASSWORD EMAIL
+// Optional public endpoint.
+// This can stay for later if email reset is configured.
+// ============================================
+
+export const requestPasswordResetEmail = async (req: any, res: Response) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email is required',
+      });
+    }
+
+    const normalizedEmail = normalizeEmail(email);
+
+    const { data: profile } = await supabaseAdmin
+      .from('profiles')
+      .select('id, email, is_active')
+      .eq('email', normalizedEmail)
+      .maybeSingle();
+
+    if (!profile || !profile.is_active) {
+      return res.json({
+        success: true,
+        message:
+          'If an active account exists for this email, a password reset link has been sent.',
+      });
+    }
+
+    const redirectTo =
+      process.env.APP_PASSWORD_RESET_REDIRECT_URL ||
+      'bestvehicles://reset-password';
+
+    const { error } = await supabaseAuth.auth.resetPasswordForEmail(
+      normalizedEmail,
+      {
+        redirectTo,
+      }
+    );
+
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.message || 'Failed to send password reset email',
+        code: error.code || null,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message:
+        'If an active account exists for this email, a password reset link has been sent.',
+    });
+  } catch (error: any) {
+    console.error('Request password reset email error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to request password reset email',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
+    });
+  }
+};
+
+// ============================================
+// UPDATE OWN PASSWORD
+// Logged-in user changes temporary/current password.
+// ============================================
+
+export const updateOwnPassword = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const { current_password, new_password, confirm_password } = req.body;
+
+    const userId = req.user?.id;
+    const userEmail = req.user?.email;
+
+    if (!userId || !userEmail) {
+      return res.status(401).json({
+        success: false,
+        error: 'User is not authenticated',
+      });
+    }
+
+    if (!current_password || !new_password || !confirm_password) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'Current password, new password, and confirm password are required',
+      });
+    }
+
+    if (String(new_password).length < 6) {
+      return res.status(400).json({
+        success: false,
+        error: 'New password must be at least 6 characters',
+      });
+    }
+
+    if (new_password !== confirm_password) {
+      return res.status(400).json({
+        success: false,
+        error: 'New password and confirm password do not match',
+      });
+    }
+
+    if (current_password === new_password) {
+      return res.status(400).json({
+        success: false,
+        error: 'New password must be different from current password',
+      });
+    }
+
+    const { error: verifyError } = await supabaseAuth.auth.signInWithPassword({
+      email: normalizeEmail(userEmail),
+      password: current_password,
+    });
+
+    if (verifyError) {
+      return res.status(401).json({
+        success: false,
+        error: 'Current password is incorrect',
+      });
+    }
+
+    const { error: updateError } =
+      await supabaseAdmin.auth.admin.updateUserById(userId, {
+        password: new_password,
+      });
+
+    if (updateError) {
+      return res.status(400).json({
+        success: false,
+        error: updateError.message || 'Failed to update password',
+        code: updateError.code || null,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Password updated successfully',
+    });
+  } catch (error: any) {
+    console.error('Update own password error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update password',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
+    });
+  }
+};
+
+// ============================================
+// CREATE USER WITH TEMPORARY PASSWORD
+// Super admin creates user and assigns first password.
+// No email invite required.
+// ============================================
 
 export const createUser = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -122,6 +309,13 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
       });
     }
 
+    if (String(password).length < 6) {
+      return res.status(400).json({
+        success: false,
+        error: 'Temporary password must be at least 6 characters',
+      });
+    }
+
     if (!isValidRole(role)) {
       return res.status(400).json({
         success: false,
@@ -130,6 +324,7 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
     }
 
     const normalizedEmail = normalizeEmail(email);
+    const cleanFullName = String(full_name).trim();
 
     const { data: createdUser, error: createError } =
       await supabaseAdmin.auth.admin.createUser({
@@ -137,13 +332,13 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
         password,
         email_confirm: true,
         user_metadata: {
-          full_name: String(full_name).trim(),
+          full_name: cleanFullName,
           role,
         },
         app_metadata: {
           role,
         },
-      });
+      } as any);
 
     if (createError || !createdUser.user) {
       return res.status(400).json({
@@ -158,7 +353,7 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
       .upsert(
         {
           id: createdUser.user.id,
-          full_name: String(full_name).trim(),
+          full_name: cleanFullName,
           email: normalizedEmail,
           role,
           is_active: true,
@@ -172,8 +367,6 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
       .single();
 
     if (profileError) {
-      await supabaseAdmin.auth.admin.deleteUser(createdUser.user.id);
-
       return res.status(400).json({
         success: false,
         error: profileError.message,
@@ -183,10 +376,21 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
       });
     }
 
+    await supabaseAdmin.auth.admin.updateUserById(createdUser.user.id, {
+      app_metadata: {
+        role,
+      },
+      user_metadata: {
+        full_name: cleanFullName,
+        role,
+      },
+    } as any);
+
     return res.json({
       success: true,
       data: profile,
-      message: 'User created successfully',
+      message:
+        'User created successfully. Give the temporary password to the user and ask them to change it after login.',
     });
   } catch (error: any) {
     console.error('Create user error:', {
@@ -205,6 +409,10 @@ export const createUser = async (req: AuthenticatedRequest, res: Response) => {
     });
   }
 };
+
+// ============================================
+// GET USERS
+// ============================================
 
 export const getUsers = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -239,6 +447,105 @@ export const getUsers = async (req: AuthenticatedRequest, res: Response) => {
     });
   }
 };
+
+// ============================================
+// DELETE USER
+// ============================================
+
+export const deleteUser = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    if (!requireSuperAdmin(req, res)) return;
+
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        error: 'User ID is required',
+      });
+    }
+
+    if (req.user?.id === id) {
+      return res.status(400).json({
+        success: false,
+        error: 'You cannot delete your own account',
+      });
+    }
+
+    const { data: targetUser, error: targetUserError } = await supabaseAdmin
+      .from('profiles')
+      .select('id, full_name, email, role, is_active')
+      .eq('id', id)
+      .maybeSingle();
+
+    if (targetUserError) throw targetUserError;
+
+    if (!targetUser) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found',
+      });
+    }
+
+    if (targetUser.role === 'super_admin') {
+      const { count, error: countError } = await supabaseAdmin
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('role', 'super_admin')
+        .eq('is_active', true)
+        .neq('id', id);
+
+      if (countError) throw countError;
+
+      if (!count || count < 1) {
+        return res.status(400).json({
+          success: false,
+          error: 'You cannot delete the last active super admin',
+        });
+      }
+    }
+
+    const { error: deleteAuthError } =
+      await supabaseAdmin.auth.admin.deleteUser(id);
+
+    if (deleteAuthError) {
+      return res.status(400).json({
+        success: false,
+        error: deleteAuthError.message || 'Failed to delete auth user',
+        code: deleteAuthError.code || null,
+      });
+    }
+
+    await supabaseAdmin.from('profiles').delete().eq('id', id);
+
+    return res.json({
+      success: true,
+      message: `${targetUser.full_name} deleted successfully`,
+    });
+  } catch (error: any) {
+    console.error('Delete user error:', {
+      message: error.message,
+      details: error.details,
+      hint: error.hint,
+      code: error.code,
+    });
+
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to delete user',
+      details: error.details || null,
+      hint: error.hint || null,
+      code: error.code || null,
+    });
+  }
+};
+
+// ============================================
+// UPDATE USER STATUS
+// ============================================
 
 export const updateUserStatus = async (
   req: AuthenticatedRequest,
@@ -300,6 +607,10 @@ export const updateUserStatus = async (
     });
   }
 };
+
+// ============================================
+// UPDATE USER ROLE
+// ============================================
 
 export const updateUserRole = async (
   req: AuthenticatedRequest,
@@ -369,6 +680,11 @@ export const updateUserRole = async (
   }
 };
 
+// ============================================
+// SUPER ADMIN RESET USER PASSWORD
+// Backup/manual override.
+// ============================================
+
 export const resetUserPassword = async (
   req: AuthenticatedRequest,
   res: Response
@@ -418,7 +734,6 @@ export const resetUserPassword = async (
       success: false,
       error: error.message || 'Failed to reset password',
       details: error.details || null,
-      hint: error.hint || null,
       code: error.code || null,
     });
   }
