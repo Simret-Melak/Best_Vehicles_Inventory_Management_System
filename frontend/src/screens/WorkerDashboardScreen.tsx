@@ -327,6 +327,10 @@ export default function WorkerDashboardScreen() {
     navigation.navigate('WorkerPendingRequests' as never);
   };
 
+  const navigateToLowStock = () => {
+    navigation.navigate('LowStock' as never);
+  };
+
   const handleViewItemHistory = (item: InventoryItem) => {
     const itemType = determineItemType(item);
 
@@ -466,6 +470,15 @@ export default function WorkerDashboardScreen() {
             onPress={() => openAddStockModal(null)}
           >
             <Text style={styles.addStockTopButtonText}>+ Add Stock</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.lowStockTopButton}
+            onPress={navigateToLowStock}
+          >
+            <Text style={styles.lowStockTopButtonText}>
+              ⚠️ Low Stock ({getLowStockCount()})
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -820,6 +833,21 @@ const styles = StyleSheet.create({
   },
   addStockTopButtonText: {
     color: '#ffffff',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  lowStockTopButton: {
+    flex: 1,
+    backgroundColor: 'rgba(251, 191, 36, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(251, 191, 36, 0.35)',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  lowStockTopButtonText: {
+    color: '#fbbf24',
     fontWeight: '700',
     fontSize: 13,
   },
